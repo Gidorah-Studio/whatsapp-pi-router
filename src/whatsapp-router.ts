@@ -627,11 +627,11 @@ export default function (pi: ExtensionAPI) {
             _ctx = ctx;
             await menuHandler.handleCommand(ctx);
 
-            // Persist state after changes
+            // Persist only connection status in the Pi session. The disk config
+            // file is the source of truth for allow/ignore lists; persisting
+            // contacts in session history can resurrect stale allowlists.
             pi.appendEntry("whatsapp-state", {
-                status: sessionManager.getStatus(),
-                allowList: sessionManager.getAllowList(),
-                allowedGroups: sessionManager.getAllowedGroups()
+                status: sessionManager.getStatus()
             });
             refreshFooterStatus();
         }
