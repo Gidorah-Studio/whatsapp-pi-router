@@ -1,0 +1,28 @@
+{
+  "name": "whatsapp-pi-router",
+  "version": "0.1.0",
+  "description": "WhatsApp-to-Pi router with one isolated Pi session per WhatsApp conversation.",
+  "type": "module",
+  "license": "MIT",
+  "author": "x4484",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/x4484/whatsapp-pi-router.git"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "whatsapp",
+    "agent",
+    "router"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
