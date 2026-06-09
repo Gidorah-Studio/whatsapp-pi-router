@@ -240,27 +240,9 @@ export default function (pi: ExtensionAPI) {
                     : data.status;
                 await sessionManager.setStatus(restoredStatus);
             }
-            // Disk config is the source of truth for allow lists. Older session
-            // snapshots may contain stale allow/ignore state; restoring them here
-            // can undo changes made through the menu or by editing config.json.
-            if (sessionManager.getAllowList().length === 0 && Array.isArray(data.allowList)) {
-                for (const n of data.allowList) {
-                    const num = typeof n === "string" ? n : n.number;
-                    const name = typeof n === "string" ? undefined : n.name;
-                    if (SessionManager.isGroupJid(num)) {
-                        await sessionManager.addAllowedGroup(num, name);
-                    } else {
-                        await sessionManager.addNumber(num, name);
-                    }
-                }
-            }
-            if (sessionManager.getAllowedGroups().length === 0 && Array.isArray(data.allowedGroups)) {
-                for (const g of data.allowedGroups) {
-                    const groupJid = typeof g === "string" ? g : g.number;
-                    const name = typeof g === "string" ? undefined : g.name;
-                    await sessionManager.addAllowedGroup(groupJid, name);
-                }
-            }
+            // Deliberately do not restore allowList/allowedGroups from session
+            // history. Disk config is the source of truth for contacts/groups;
+            // old session snapshots can contain stale allow/ignore state.
         }
 
         if (isWhatsappPiOn && registered) {
