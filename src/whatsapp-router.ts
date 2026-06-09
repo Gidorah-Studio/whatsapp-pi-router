@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -47,6 +47,27 @@ const buildPrompt = (params: {
     '',
     'Reply naturally to the WhatsApp sender. Return only the message text to send back.',
 ].join('\n');
+
+const loadForcedAllowNumbers = async (): Promise<string[]> => {
+    const fromEnv = (process.env.WHATSAPP_ROUTER_ALLOW_NUMBERS || '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean);
+    try {
+        const raw = await readFile(join(process.env.HOME || '', '.pi', 'agent', 'extensions', 'whatsapp-pi', 'router-allow.json'), 'utf8');
+        const parsed = JSON.parse(raw) as unknown;
+        const fromFile = Array.isArray(parsed)
+            ? parsed
+            : parsed && typeof parsed === 'object' && Array.isArray((parsed as { allow?: unknown[] }).allow)
+                ? (parsed as { allow: unknown[] }).allow
+                : [];
+        return [...fromEnv, ...fromFile]
+            .map((value) => typeof value === 'string' ? value.trim() : '')
+            .filter(Boolean);
+    } catch {
+        return fromEnv;
+    }
+};
 
 const runPiForConversation = async (params: {
     sessionId: string;
@@ -203,6 +224,9 @@ export default function (pi: ExtensionAPI) {
         }
 
         await sessionManager.ensureInitialized();
+        for (const number of await loadForcedAllowNumbers()) {
+            await sessionManager.addNumber(number);
+        }
         await recentsService.ensureInitialized();
         installGracefulShutdownHandlers();
         shutdownState.__whatsappPiShutdown = {
