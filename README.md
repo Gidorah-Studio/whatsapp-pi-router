@@ -1,19 +1,25 @@
 # whatsapp-pi-router
 
-WhatsApp-to-Pi router intended to keep each WhatsApp conversation in its own isolated Pi session.
+WhatsApp-to-Pi router with one isolated Pi session per WhatsApp conversation.
 
-## Goal
+This package is based on the `whatsapp-pi` WhatsApp integration, but inbound WhatsApp messages are routed to stable per-conversation Pi sessions instead of being injected into the currently active terminal session.
 
-Route inbound WhatsApp messages by conversation identity:
+## Routing model
 
-- direct chats → `whatsapp:direct:<hash>`
-- group chats → `whatsapp:group:<hash>`
+Each WhatsApp thread gets a deterministic Pi session id:
 
-This follows the OpenClaw-style routing model: one logical agent session per conversation, instead of mixing all WhatsApp chats into the active terminal session.
+- direct chats → `whatsapp-direct-<sha256-jid-prefix>`
+- group chats → `whatsapp-group-<sha256-jid-prefix>`
 
-## Status
+On each inbound message, the extension runs a headless Pi turn for that session:
 
-Initial scaffold. Implementation coming next.
+```bash
+pi --session-id <conversation-session> --no-extensions --print "<message>"
+```
+
+The final stdout is sent back to the originating WhatsApp chat.
+
+This gives clean segregation between WhatsApp conversations while avoiding recursive loading of the WhatsApp extension inside child Pi turns.
 
 ## Install from GitHub
 
@@ -23,19 +29,42 @@ pi install https://github.com/x4484/whatsapp-pi-router
 
 Then restart Pi or run `/reload`.
 
-## Planned architecture
+## Usage
 
-1. Connect to WhatsApp Web.
-2. Apply allowlist/group policy.
-3. Derive a stable session key from the WhatsApp JID.
-4. Dispatch message into the matching Pi SDK session.
-5. Capture final assistant response.
-6. Send response back to the same WhatsApp thread.
+Start Pi with the router online:
+
+```bash
+pi --whatsapp-pi-online
+```
+
+Or start Pi normally, open `/whatsapp`, connect WhatsApp, and manage allowed contacts/groups.
+
+The router preserves the original allowlist/group controls from `whatsapp-pi`.
+
+## Configuration
+
+Optional environment variables:
+
+- `WHATSAPP_PI_ROUTER_PI_BIN` — Pi executable to spawn. Defaults to `pi`.
+- `WHATSAPP_PI_ROUTER_TIMEOUT_MS` — child Pi turn timeout. Defaults to 10 minutes.
 
 ## Development
 
 ```bash
 git clone https://github.com/x4484/whatsapp-pi-router.git
 cd whatsapp-pi-router
-pi -e ./src/index.ts
+npm install
+pi -e ./src/whatsapp-router.ts
 ```
+
+Run a typecheck:
+
+```bash
+npx tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --skipLibCheck --allowSyntheticDefaultImports src/whatsapp-router.ts
+```
+
+## Notes
+
+- Child Pi turns use `--no-extensions` to avoid recursively starting another WhatsApp router.
+- Session history is still persistent because `--session-id` is stable per WhatsApp JID.
+- Streaming is intentionally not implemented; WhatsApp receives the final answer once the child Pi turn completes.

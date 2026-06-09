@@ -18,11 +18,25 @@
   ],
   "pi": {
     "extensions": [
-      "./src/index.ts"
-    ]
+      "./src/whatsapp-router.ts"
+    ],
+    "image": "https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@llamaindex/liteparse": "^1.5.3",
+    "@sinclair/typebox": "^0.27.10",
+    "baileys": "^6.7.21",
+    "pino": "^10.3.1",
+    "qrcode-terminal": "^0.12.0",
+    "whisper-cpp-node": "^0.2.12"
+  },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "@types/qrcode-terminal": "^0.12.2",
+    "typescript": "^6.0.3"
   }
 }
