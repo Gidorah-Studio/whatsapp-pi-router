@@ -643,8 +643,14 @@ export default function (pi: ExtensionAPI) {
         }
     });
 
-    // Handle outgoing messages (Agent -> WhatsApp)
+    // Legacy whatsapp-pi behavior forwards assistant replies from the operator's
+    // current Pi session to the last WhatsApp chat. The router sends replies
+    // explicitly from the per-conversation child session, so keep legacy outbound
+    // disabled by default to avoid leaking local/operator chats into WhatsApp.
+    const mainSessionOutboundEnabled = () => process.env.WHATSAPP_ROUTER_ENABLE_MAIN_SESSION_OUTBOUND === 'true';
+
     pi.on("agent_start", async (_event, _ctx) => {
+        if (!mainSessionOutboundEnabled()) return;
         if (sessionManager.getStatus() !== 'connected') return;
         const lastJid = whatsappService.getLastRemoteJid();
         if (lastJid) {
@@ -653,6 +659,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("message_end", async (event, ctx) => {
+        if (!mainSessionOutboundEnabled()) return;
         if (sessionManager.getStatus() !== 'connected') return;
 
         const { message } = event;
