@@ -568,6 +568,10 @@ export class WhatsAppService {
         });
     }
 
+    private shouldRecordIgnoredMessages(): boolean {
+        return process.env.WHATSAPP_ROUTER_RECORD_IGNORED === 'true';
+    }
+
     public async handleIncomingMessages(payload: MessagesUpsertEvent) {
         if (this.sessionManager.getStatus() !== 'connected') return;
 
@@ -594,16 +598,19 @@ export class WhatsAppService {
         const senderJid = isGroup
             ? remoteJid
             : this.normalizeContactNumber(remoteJid.split('@')[0]);
-        void this.recordIncomingMessage(message, remoteJid, text);
 
         const pushName = message.pushName || undefined;
 
         if (this.boundGroupJid) {
             if (!this.sessionManager.isAllowedGroup(this.boundGroupJid)) {
+                if (this.shouldRecordIgnoredMessages()) {
+                    void this.recordIncomingMessage(message, remoteJid, text);
+                }
                 await this.sessionManager.trackIgnoredNumber(this.boundGroupJid, pushName);
                 return;
             }
 
+            void this.recordIncomingMessage(message, remoteJid, text);
             this.lastRemoteJid = remoteJid;
             this.onMessage?.(payload);
             return;
@@ -613,10 +620,14 @@ export class WhatsAppService {
             if (this.isVerbose()) {
                 console.log(t('service.whatsapp.ignoredNotAllowed', { senderJid }));
             }
+            if (this.shouldRecordIgnoredMessages()) {
+                void this.recordIncomingMessage(message, remoteJid, text);
+            }
             await this.sessionManager.trackIgnoredNumber(senderJid, pushName);
             return;
         }
 
+        void this.recordIncomingMessage(message, remoteJid, text);
         this.lastRemoteJid = remoteJid;
         this.onMessage?.(payload);
     }
