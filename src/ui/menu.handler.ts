@@ -531,8 +531,7 @@ export class MenuHandler {
         await this.sendPromptedMenuMessage(ctx, {
             displayName: this.formatAllowedContactOption(contact),
             senderNumber: contact.sendNumber!,
-            senderName: contact.name,
-            appendPiSuffix: true
+            senderName: contact.name
         });
     }
 
@@ -540,8 +539,7 @@ export class MenuHandler {
         await this.sendPromptedMenuMessage(ctx, {
             displayName: this.formatAllowedGroupOption(group),
             senderNumber: group.number,
-            senderName: group.name,
-            appendPiSuffix: true
+            senderName: group.name
         });
     }
 
@@ -551,10 +549,9 @@ export class MenuHandler {
             displayName: string;
             senderNumber: string;
             senderName?: string;
-            appendPiSuffix: boolean;
         }
     ) {
-        const { displayName, senderNumber, senderName, appendPiSuffix } = options;
+        const { displayName, senderNumber, senderName } = options;
         for (let attempt = 0; attempt < 2; attempt++) {
             const inputText = (await ctx.ui.input(t('menu.allowed.sendPrompt', { displayName })))?.trim() || '';
 
@@ -563,7 +560,7 @@ export class MenuHandler {
                 continue;
             }
 
-            const messageText = appendPiSuffix ? `${inputText} π` : inputText;
+            const messageText = inputText;
             const result = await this.whatsappService.sendMenuMessage(this.toJid(senderNumber), messageText);
             if (result.success) {
                 await this.recentsService.recordMessage({

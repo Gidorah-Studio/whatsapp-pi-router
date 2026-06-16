@@ -537,10 +537,6 @@ export class WhatsAppService {
         return message?.conversation || message?.extendedTextMessage?.text || '';
     }
 
-    private isPiGeneratedMessage(text: string): boolean {
-        return text.endsWith('π');
-    }
-
     private getIncomingTimestamp(timestamp: number | string | undefined): number {
         if (typeof timestamp === 'number') {
             return timestamp;
@@ -580,7 +576,6 @@ export class WhatsAppService {
         if (message.key.fromMe) return;
 
         const text = this.extractText(message.message);
-        if (this.isPiGeneratedMessage(text)) return;
 
         const remoteJid = message.key.remoteJid;
         const isGroup = remoteJid.endsWith('@g.us');

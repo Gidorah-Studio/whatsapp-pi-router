@@ -72,9 +72,8 @@ export class MessageSender {
                 }
 
                 // 4. Send the message
-                // Note: Branding π is applied here to ensure consistency
-                const response = await socket.sendMessage(request.recipientJid, { 
-                    text: `${request.text} π` 
+                const response = await socket.sendMessage(request.recipientJid, {
+                    text: request.text
                 });
 
                 fileLog(`SUCCESS sending to ${request.recipientJid} on attempt ${attempts}`);
