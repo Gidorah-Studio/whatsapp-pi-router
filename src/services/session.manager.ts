@@ -40,7 +40,8 @@ export class SessionManager {
     private allowList: Contact[] = [];
     private allowedGroups: Contact[] = [];
     private ignoredNumbers: Contact[] = [];
-    private allowAllConversations = false;
+    private allowAllDirectChats = false;
+    private allowAllGroups = false;
     private hasAuthState = false;
     private openaiKey: string = '';
     private visionModel: string = 'gpt-4o';
@@ -234,12 +235,20 @@ export class SessionManager {
         }
     }
 
-    setAllowAllConversations(allowAll: boolean) {
-        this.allowAllConversations = allowAll;
+    setAllowAllDirectChats(allowAll: boolean) {
+        this.allowAllDirectChats = allowAll;
     }
 
-    getAllowAllConversations(): boolean {
-        return this.allowAllConversations;
+    getAllowAllDirectChats(): boolean {
+        return this.allowAllDirectChats;
+    }
+
+    setAllowAllGroups(allowAll: boolean) {
+        this.allowAllGroups = allowAll;
+    }
+
+    getAllowAllGroups(): boolean {
+        return this.allowAllGroups;
     }
 
     getAllowList(): Contact[] {
@@ -392,15 +401,14 @@ export class SessionManager {
     }
 
     isAllowed(number: string): boolean {
-        return this.allowAllConversations || this.allowList.some(c => c.number === number);
+        return this.allowAllDirectChats || this.allowList.some(c => c.number === number);
     }
 
     isAllowedGroup(groupJid: string): boolean {
-        return this.allowAllConversations || this.allowedGroups.some(c => c.number === groupJid);
+        return this.allowAllGroups || this.allowedGroups.some(c => c.number === groupJid);
     }
 
     isConversationAllowed(sender: string): boolean {
-        if (this.allowAllConversations) return true;
         return SessionManager.isGroupJid(sender)
             ? this.isAllowedGroup(sender)
             : this.isAllowed(sender);

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -15,6 +15,7 @@ import { IncomingMediaService } from './services/incoming-media.service.js';
 import { WhatsAppPiLogger } from './services/whatsapp-pi.logger.js';
 import { ReactionSender } from './services/reaction.sender.js';
 import { initI18n, t } from './i18n.js';
+import { loadRouterAllowConfig } from './services/router-allow.config.js';
 
 const shutdownState = globalThis as typeof globalThis & {
     __whatsappPiShutdown?: {
@@ -47,45 +48,6 @@ const buildPrompt = (params: {
     '',
     'Reply naturally to the WhatsApp sender. Return only the message text to send back.',
 ].join('\n');
-
-type RouterAllowConfig = {
-    allowAll: boolean;
-    allow: string[];
-};
-
-const isTruthyConfigValue = (value: unknown): boolean => {
-    if (typeof value === 'boolean') return value;
-    if (typeof value === 'number') return value !== 0;
-    if (typeof value !== 'string') return false;
-    return ['1', 'true', 'yes', 'on', '*', 'all'].includes(value.trim().toLowerCase());
-};
-
-const loadRouterAllowConfig = async (): Promise<RouterAllowConfig> => {
-    const fromEnv = (process.env.WHATSAPP_ROUTER_ALLOW_NUMBERS || '')
-        .split(',')
-        .map((value) => value.trim())
-        .filter(Boolean);
-    const envAllowAll = isTruthyConfigValue(process.env.WHATSAPP_ROUTER_ALLOW_ALL);
-
-    try {
-        const raw = await readFile(join(process.env.HOME || '', '.pi', 'agent', 'extensions', 'whatsapp-pi', 'router-allow.json'), 'utf8');
-        const parsed = JSON.parse(raw) as unknown;
-        const fromFile = Array.isArray(parsed)
-            ? parsed
-            : parsed && typeof parsed === 'object' && Array.isArray((parsed as { allow?: unknown[] }).allow)
-                ? (parsed as { allow: unknown[] }).allow
-                : [];
-        const fileAllowAll = Boolean(parsed && typeof parsed === 'object' && isTruthyConfigValue((parsed as { allowAll?: unknown }).allowAll));
-        return {
-            allowAll: envAllowAll || fileAllowAll,
-            allow: [...fromEnv, ...fromFile]
-                .map((value) => typeof value === 'string' ? value.trim() : '')
-                .filter(Boolean),
-        };
-    } catch {
-        return { allowAll: envAllowAll, allow: fromEnv };
-    }
-};
 
 const runPiForConversation = async (params: {
     sessionId: string;
@@ -179,6 +141,16 @@ export default function (pi: ExtensionAPI) {
             return status;
         }
 
+        if (sessionManager.getAllowAllDirectChats()) {
+            return sessionManager.getAllowAllGroups()
+                ? `${status} - All direct chats and groups`
+                : `${status} - All direct chats`;
+        }
+
+        if (sessionManager.getAllowAllGroups()) {
+            return `${status} - All groups`;
+        }
+
         const allowedChats = sessionManager.getAllowList().length + sessionManager.getAllowedGroups().length;
         if (allowedChats === 0) {
             return `${status} - No chats`;
@@ -243,9 +215,13 @@ export default function (pi: ExtensionAPI) {
 
         await sessionManager.ensureInitialized();
         const routerAllowConfig = await loadRouterAllowConfig();
-        sessionManager.setAllowAllConversations(routerAllowConfig.allowAll);
-        if (routerAllowConfig.allowAll) {
-            logger.log('[WhatsApp-Pi] Router allow-all mode enabled; inbound direct and group conversations will be routed without allowlist checks.');
+        sessionManager.setAllowAllDirectChats(routerAllowConfig.allowAllDirectChats);
+        sessionManager.setAllowAllGroups(routerAllowConfig.allowAllGroups);
+        if (routerAllowConfig.allowAllDirectChats) {
+            logger.log('[WhatsApp-Pi] Router allow-all direct chats mode enabled; inbound direct chats will be routed without allowlist checks. Groups still require explicit allow unless group allow-all is enabled.');
+        }
+        if (routerAllowConfig.allowAllGroups) {
+            logger.log('[WhatsApp-Pi] Router allow-all groups mode enabled; inbound group conversations will be routed without allowlist checks.');
         }
         for (const number of routerAllowConfig.allow) {
             await sessionManager.addNumber(number);

@@ -7,6 +7,7 @@ import { showMessageReplyView } from './message-reply.view.js';
 import * as qrcode from 'qrcode-terminal';
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { t } from '../i18n.js';
+import { updateRouterAllowFileConfig } from '../services/router-allow.config.js';
 
 interface HistoryOptionEntry {
     label: string;
@@ -38,6 +39,9 @@ export class MenuHandler {
         const allowedGroupsLabel = t('menu.root.allowedGroups');
         const disconnectWhatsAppLabel = t('menu.root.disconnectWhatsApp');
         const connectWhatsAppLabel = t('menu.root.connectWhatsApp');
+        const allowAllDirectChatsLabel = t(this.sessionManager.getAllowAllDirectChats()
+            ? 'menu.root.allowAllDirectChatsOn'
+            : 'menu.root.allowAllDirectChatsOff');
         const logoffDeleteSessionLabel = t('menu.root.logoffDeleteSession');
         const backLabel = t('menu.root.back');
         const options: string[] = [];
@@ -46,9 +50,11 @@ export class MenuHandler {
             options.push(recentsLabel);
             options.push(allowedContactsLabel);
             options.push(allowedGroupsLabel);
+            options.push(allowAllDirectChatsLabel);
             options.push(disconnectWhatsAppLabel);
         } else {
             options.push(connectWhatsAppLabel);
+            options.push(allowAllDirectChatsLabel);
         }
 
         if (registered) {
@@ -93,10 +99,42 @@ export class MenuHandler {
             case allowedGroupsLabel:
                 await this.manageAllowedGroups(ctx);
                 break;
+            case allowAllDirectChatsLabel:
+                await this.toggleAllowAllDirectChats(ctx);
+                break;
             case recentsLabel:
                 await this.manageRecents(ctx);
                 break;
         }
+    }
+
+    private async toggleAllowAllDirectChats(ctx: ExtensionCommandContext) {
+        const nextAllowAll = !this.sessionManager.getAllowAllDirectChats();
+
+        if (nextAllowAll) {
+            const confirmed = await ctx.ui.confirm(
+                t('menu.root.allowAllDirectChatsConfirmTitle'),
+                t('menu.root.allowAllDirectChatsConfirmMessage')
+            );
+            if (!confirmed) {
+                await this.handleCommand(ctx);
+                return;
+            }
+        }
+
+        try {
+            await updateRouterAllowFileConfig({ allowAllDirectChats: nextAllowAll });
+            this.sessionManager.setAllowAllDirectChats(nextAllowAll);
+            ctx.ui.notify(nextAllowAll
+                ? t('menu.root.allowAllDirectChatsEnabled')
+                : t('menu.root.allowAllDirectChatsDisabled'), nextAllowAll ? 'warning' : 'info');
+        } catch (error) {
+            ctx.ui.notify(t('menu.root.allowAllDirectChatsSaveFailure', {
+                error: error instanceof Error ? error.message : String(error)
+            }), 'error');
+        }
+
+        await this.handleCommand(ctx);
     }
 
     private async manageAllowList(ctx: ExtensionCommandContext) {
@@ -453,7 +491,7 @@ export class MenuHandler {
         const choice = await ctx.ui.select(title, options);
 
         if (choice === allowContactLabel) {
-            if (this.sessionManager.isConversationAllowed(conversation.senderNumber)) {
+            if (allowedContact) {
                 ctx.ui.notify(t('menu.recents.alreadyAllowed', { number: conversation.senderNumber }), 'info');
             } else if (isGroup) {
                 await this.sessionManager.addAllowedGroup(conversation.senderNumber, conversation.senderName);

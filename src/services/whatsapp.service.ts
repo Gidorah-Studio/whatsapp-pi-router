@@ -577,6 +577,7 @@ export class WhatsAppService {
 
         const message = payload.messages?.[0];
         if (!message || !message.key.remoteJid) return;
+        if (message.key.fromMe) return;
 
         const text = this.extractText(message.message);
         if (this.isPiGeneratedMessage(text)) return;
