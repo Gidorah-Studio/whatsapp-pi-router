@@ -48,11 +48,25 @@ const buildPrompt = (params: {
     'Reply naturally to the WhatsApp sender. Return only the message text to send back.',
 ].join('\n');
 
-const loadForcedAllowNumbers = async (): Promise<string[]> => {
+type RouterAllowConfig = {
+    allowAll: boolean;
+    allow: string[];
+};
+
+const isTruthyConfigValue = (value: unknown): boolean => {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value !== 'string') return false;
+    return ['1', 'true', 'yes', 'on', '*', 'all'].includes(value.trim().toLowerCase());
+};
+
+const loadRouterAllowConfig = async (): Promise<RouterAllowConfig> => {
     const fromEnv = (process.env.WHATSAPP_ROUTER_ALLOW_NUMBERS || '')
         .split(',')
         .map((value) => value.trim())
         .filter(Boolean);
+    const envAllowAll = isTruthyConfigValue(process.env.WHATSAPP_ROUTER_ALLOW_ALL);
+
     try {
         const raw = await readFile(join(process.env.HOME || '', '.pi', 'agent', 'extensions', 'whatsapp-pi', 'router-allow.json'), 'utf8');
         const parsed = JSON.parse(raw) as unknown;
@@ -61,11 +75,15 @@ const loadForcedAllowNumbers = async (): Promise<string[]> => {
             : parsed && typeof parsed === 'object' && Array.isArray((parsed as { allow?: unknown[] }).allow)
                 ? (parsed as { allow: unknown[] }).allow
                 : [];
-        return [...fromEnv, ...fromFile]
-            .map((value) => typeof value === 'string' ? value.trim() : '')
-            .filter(Boolean);
+        const fileAllowAll = Boolean(parsed && typeof parsed === 'object' && isTruthyConfigValue((parsed as { allowAll?: unknown }).allowAll));
+        return {
+            allowAll: envAllowAll || fileAllowAll,
+            allow: [...fromEnv, ...fromFile]
+                .map((value) => typeof value === 'string' ? value.trim() : '')
+                .filter(Boolean),
+        };
     } catch {
-        return fromEnv;
+        return { allowAll: envAllowAll, allow: fromEnv };
     }
 };
 
@@ -224,7 +242,12 @@ export default function (pi: ExtensionAPI) {
         }
 
         await sessionManager.ensureInitialized();
-        for (const number of await loadForcedAllowNumbers()) {
+        const routerAllowConfig = await loadRouterAllowConfig();
+        sessionManager.setAllowAllConversations(routerAllowConfig.allowAll);
+        if (routerAllowConfig.allowAll) {
+            logger.log('[WhatsApp-Pi] Router allow-all mode enabled; inbound direct and group conversations will be routed without allowlist checks.');
+        }
+        for (const number of routerAllowConfig.allow) {
             await sessionManager.addNumber(number);
         }
         await recentsService.ensureInitialized();

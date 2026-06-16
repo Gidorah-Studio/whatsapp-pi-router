@@ -39,7 +39,18 @@ pi --whatsapp-pi-online
 
 Or start Pi normally, open `/whatsapp`, connect WhatsApp, and manage allowed contacts/groups.
 
-The router preserves the original allowlist/group controls from `whatsapp-pi`.
+The router preserves the original allowlist/group controls from `whatsapp-pi` by default.
+
+To allow every inbound WhatsApp direct chat and group to route to Pi, enable router allow-all mode in `~/.pi/agent/extensions/whatsapp-pi/router-allow.json`:
+
+```json
+{
+  "allowAll": true,
+  "allow": []
+}
+```
+
+`allowAll` bypasses allowlist checks at runtime without deleting the saved allowlist. Set it back to `false` or remove it to return to explicit allowlist mode.
 
 ## Configuration
 
@@ -47,6 +58,8 @@ Optional environment variables:
 
 - `WHATSAPP_PI_ROUTER_PI_BIN` — Pi executable to spawn. Defaults to `pi`.
 - `WHATSAPP_PI_ROUTER_TIMEOUT_MS` — child Pi turn timeout. Defaults to 10 minutes.
+- `WHATSAPP_ROUTER_ALLOW_NUMBERS` — comma-separated numbers/JIDs to force-add to the allowlist at startup.
+- `WHATSAPP_ROUTER_ALLOW_ALL` — set to `true`, `1`, `yes`, `on`, `all`, or `*` to route every inbound direct chat and group without allowlist checks.
 
 ## Development
 

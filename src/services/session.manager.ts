@@ -40,6 +40,7 @@ export class SessionManager {
     private allowList: Contact[] = [];
     private allowedGroups: Contact[] = [];
     private ignoredNumbers: Contact[] = [];
+    private allowAllConversations = false;
     private hasAuthState = false;
     private openaiKey: string = '';
     private visionModel: string = 'gpt-4o';
@@ -233,6 +234,14 @@ export class SessionManager {
         }
     }
 
+    setAllowAllConversations(allowAll: boolean) {
+        this.allowAllConversations = allowAll;
+    }
+
+    getAllowAllConversations(): boolean {
+        return this.allowAllConversations;
+    }
+
     getAllowList(): Contact[] {
         return this.allowList;
     }
@@ -383,14 +392,15 @@ export class SessionManager {
     }
 
     isAllowed(number: string): boolean {
-        return this.allowList.some(c => c.number === number);
+        return this.allowAllConversations || this.allowList.some(c => c.number === number);
     }
 
     isAllowedGroup(groupJid: string): boolean {
-        return this.allowedGroups.some(c => c.number === groupJid);
+        return this.allowAllConversations || this.allowedGroups.some(c => c.number === groupJid);
     }
 
     isConversationAllowed(sender: string): boolean {
+        if (this.allowAllConversations) return true;
         return SessionManager.isGroupJid(sender)
             ? this.isAllowedGroup(sender)
             : this.isAllowed(sender);
