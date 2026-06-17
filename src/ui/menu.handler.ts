@@ -480,7 +480,7 @@ export class MenuHandler {
             : t('menu.recents.contact.allowNumber');
         const linkPhoneLabel = t('menu.recents.contact.linkPhone');
         const linkEmailLabel = t('menu.recents.contact.linkEmail');
-        const linkCrmLeadLabel = t('menu.recents.contact.linkCrmLead');
+        const linkExternalRecordLabel = t('menu.recents.contact.linkExternalRecord');
         const clearIdentityLabel = t('menu.recents.contact.clearIdentity');
         const removeAliasLabel = t('menu.recents.contact.removeAlias');
         const backLabel = t('menu.recents.contact.back');
@@ -491,8 +491,8 @@ export class MenuHandler {
         }
 
         if (!isGroup) {
-            options.push(linkPhoneLabel, linkEmailLabel, linkCrmLeadLabel);
-            if (identity && (identity.phone || identity.email || identity.crmLeadId)) {
+            options.push(linkPhoneLabel, linkEmailLabel, linkExternalRecordLabel);
+            if (identity && (identity.phone || identity.email || identity.externalRecordId)) {
                 options.push(clearIdentityLabel);
             }
         }
@@ -529,13 +529,13 @@ export class MenuHandler {
             return;
         }
 
-        if (choice === linkCrmLeadLabel) {
-            await this.linkRecentCrmLead(ctx, conversation);
+        if (choice === linkExternalRecordLabel) {
+            await this.linkRecentExternalRecord(ctx, conversation);
             return;
         }
 
         if (choice === clearIdentityLabel) {
-            await this.identityMapService.clearLookup(conversation.senderNumber);
+            await this.identityMapService.clearLinkedIdentity(conversation.senderNumber);
             ctx.ui.notify(t('menu.recents.identityCleared', { number: conversation.senderNumber }), 'info');
             await this.manageRecentConversation(ctx, conversation);
             return;
@@ -598,20 +598,19 @@ export class MenuHandler {
         await this.manageRecentConversation(ctx, conversation);
     }
 
-    private async linkRecentCrmLead(ctx: ExtensionCommandContext, conversation: RecentConversationSummary) {
-        const input = await ctx.ui.input(t('menu.recents.identity.enterCrmLead', { number: conversation.senderNumber }));
-        const crmLeadId = Number.parseInt(input || '', 10);
-        if (!Number.isInteger(crmLeadId) || crmLeadId <= 0) {
-            ctx.ui.notify(t('menu.recents.identity.invalidCrmLead'), 'error');
+    private async linkRecentExternalRecord(ctx: ExtensionCommandContext, conversation: RecentConversationSummary) {
+        const externalRecordId = (await ctx.ui.input(t('menu.recents.identity.enterExternalRecord', { number: conversation.senderNumber })))?.trim() || '';
+        if (!externalRecordId) {
+            ctx.ui.notify(t('menu.recents.identity.invalidExternalRecord'), 'error');
             await this.manageRecentConversation(ctx, conversation);
             return;
         }
 
         await this.identityMapService.setManualMapping(conversation.senderNumber, {
-            crmLeadId,
+            externalRecordId,
             pushName: conversation.senderName
         });
-        ctx.ui.notify(t('menu.recents.identity.crmLeadLinked', { crmLeadId }), 'info');
+        ctx.ui.notify(t('menu.recents.identity.externalRecordLinked', { externalRecordId }), 'info');
         await this.manageRecentConversation(ctx, conversation);
     }
 

@@ -40,11 +40,16 @@ const toConversationId = (remoteJid: string): string => {
     return /^\d+$/.test(localPart) ? `+${localPart}` : remoteJid;
 };
 
-const formatCrmLookupLine = (identity?: IdentityMapEntry): string => {
-    if (identity?.crmLeadId) return `Known CRM lookup: id=${identity.crmLeadId}`;
-    if (identity?.email) return `Known CRM lookup: email=${identity.email}`;
-    if (identity?.phone) return `Known CRM lookup: phone=${identity.phone}`;
-    return 'Known CRM lookup: none';
+const formatLinkedIdentityLine = (identity?: IdentityMapEntry): string => {
+    const values = [
+        identity?.externalRecordId ? `externalRecordId=${identity.externalRecordId}` : undefined,
+        identity?.email ? `email=${identity.email}` : undefined,
+        identity?.phone ? `phone=${identity.phone}` : undefined,
+    ].filter(Boolean);
+
+    return values.length > 0
+        ? `Known linked identity: ${values.join(', ')}`
+        : 'Known linked identity: none';
 };
 
 const buildPrompt = (params: {
@@ -63,8 +68,8 @@ const buildPrompt = (params: {
     `Conversation identity key: ${params.conversationId}`,
     `WhatsApp display name: ${params.pushName}`,
     `Sender/participant: ${params.participant}`,
-    formatCrmLookupLine(params.identity),
-    'CRM lookup rule: use only a known phone, email, or lead ID for CRM lookups. Never use the WhatsApp display name as a CRM lookup key, and never reveal CRM/internal notes to the WhatsApp contact.',
+    formatLinkedIdentityLine(params.identity),
+    'Identity rule: WhatsApp display names are user-controlled and are not stable lookup keys. Use only linked phone, email, or external record ID for account/contact lookups. Do not reveal private/internal record details to the WhatsApp contact unless the user explicitly asks in an internal context.',
     '',
     `${params.messageHeader} ${params.text}`,
     '',

@@ -11,7 +11,7 @@ export interface IdentityMapEntry {
     phone?: string;
     phoneJid?: string;
     email?: string;
-    crmLeadId?: number;
+    externalRecordId?: string;
     source: IdentityMapSource;
     updatedAt: number;
 }
@@ -53,8 +53,8 @@ function isPhoneJid(jid: string): boolean {
     return jid.endsWith('@s.whatsapp.net');
 }
 
-function hasLookup(entry: IdentityMapEntry): boolean {
-    return Boolean(entry.crmLeadId || entry.email || entry.phone);
+function hasLinkedIdentity(entry: IdentityMapEntry): boolean {
+    return Boolean(entry.externalRecordId || entry.email || entry.phone);
 }
 
 export class IdentityMapService {
@@ -75,18 +75,18 @@ export class IdentityMapService {
         return this.entries.get(conversationId);
     }
 
-    getCrmLookup(conversationId: string): { kind: 'id' | 'email' | 'phone'; value: string } | undefined {
+    getLinkedIdentity(conversationId: string): { kind: 'externalRecordId' | 'email' | 'phone'; value: string } | undefined {
         const entry = this.get(conversationId);
         if (!entry) return undefined;
-        if (entry.crmLeadId) return { kind: 'id', value: String(entry.crmLeadId) };
+        if (entry.externalRecordId) return { kind: 'externalRecordId', value: entry.externalRecordId };
         if (entry.email) return { kind: 'email', value: entry.email };
         if (entry.phone) return { kind: 'phone', value: entry.phone };
         return undefined;
     }
 
-    hasLookup(conversationId: string): boolean {
+    hasLinkedIdentity(conversationId: string): boolean {
         const entry = this.get(conversationId);
-        return entry ? hasLookup(entry) : false;
+        return entry ? hasLinkedIdentity(entry) : false;
     }
 
     async recordIncomingIdentity(input: IncomingIdentityInput) {
@@ -101,7 +101,7 @@ export class IdentityMapService {
             phone: existing?.phone ?? phone,
             phoneJid: existing?.phoneJid ?? phoneJidFromDigits(phone),
             email: existing?.email,
-            crmLeadId: existing?.crmLeadId,
+            externalRecordId: existing?.externalRecordId,
             source: existing?.source ?? 'auto',
             updatedAt: existing ? existing.updatedAt : now
         };
@@ -115,7 +115,7 @@ export class IdentityMapService {
         await this.persistQueued();
     }
 
-    async setManualMapping(conversationId: string, patch: Pick<Partial<IdentityMapEntry>, 'phone' | 'email' | 'crmLeadId' | 'pushName' | 'whatsappJid'>) {
+    async setManualMapping(conversationId: string, patch: Pick<Partial<IdentityMapEntry>, 'phone' | 'email' | 'externalRecordId' | 'pushName' | 'whatsappJid'>) {
         await this.ensureInitialized();
         const existing = this.entries.get(conversationId);
         const phone = patch.phone ? normalizePhoneDigits(patch.phone) : existing?.phone;
@@ -126,7 +126,7 @@ export class IdentityMapService {
             phone,
             phoneJid: phone ? phoneJidFromDigits(phone) : existing?.phoneJid,
             email: patch.email ? normalizeIdentityEmail(patch.email) : existing?.email,
-            crmLeadId: patch.crmLeadId ?? existing?.crmLeadId,
+            externalRecordId: patch.externalRecordId?.trim() || existing?.externalRecordId,
             source: 'manual',
             updatedAt: Date.now()
         };
@@ -135,7 +135,7 @@ export class IdentityMapService {
         return next;
     }
 
-    async clearLookup(conversationId: string) {
+    async clearLinkedIdentity(conversationId: string) {
         await this.ensureInitialized();
         const existing = this.entries.get(conversationId);
         if (!existing) return;
@@ -186,7 +186,7 @@ export class IdentityMapService {
             phone: typeof candidate.phone === 'string' ? normalizePhoneDigits(candidate.phone) : undefined,
             phoneJid: typeof candidate.phoneJid === 'string' ? candidate.phoneJid : undefined,
             email: typeof candidate.email === 'string' ? normalizeIdentityEmail(candidate.email) : undefined,
-            crmLeadId: typeof candidate.crmLeadId === 'number' ? candidate.crmLeadId : undefined,
+            externalRecordId: typeof candidate.externalRecordId === 'string' ? candidate.externalRecordId : undefined,
             source: candidate.source === 'manual' ? 'manual' : 'auto',
             updatedAt: typeof candidate.updatedAt === 'number' ? candidate.updatedAt : Date.now()
         };
@@ -200,7 +200,7 @@ export class IdentityMapService {
             && left?.phone === right.phone
             && left?.phoneJid === right.phoneJid
             && left?.email === right.email
-            && left?.crmLeadId === right.crmLeadId
+            && left?.externalRecordId === right.externalRecordId
             && left?.source === right.source;
     }
 
