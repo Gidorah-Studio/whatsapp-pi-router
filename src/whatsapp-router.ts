@@ -16,6 +16,7 @@ import { WhatsAppPiLogger } from './services/whatsapp-pi.logger.js';
 import { ReactionSender } from './services/reaction.sender.js';
 import { initI18n, t } from './i18n.js';
 import { loadRouterAllowConfig } from './services/router-allow.config.js';
+import { IdentityMapService, type IdentityMapEntry } from './services/identity-map.service.js';
 
 const shutdownState = globalThis as typeof globalThis & {
     __whatsappPiShutdown?: {
@@ -30,6 +31,22 @@ const routeSessionId = (remoteJid: string): string => {
     return `whatsapp-${kind}-${hash}`;
 };
 
+const toConversationId = (remoteJid: string): string => {
+    if (remoteJid.endsWith('@g.us') || remoteJid.endsWith('@lid')) {
+        return remoteJid;
+    }
+
+    const localPart = remoteJid.split('@')[0].split(':')[0];
+    return /^\d+$/.test(localPart) ? `+${localPart}` : remoteJid;
+};
+
+const formatCrmLookupLine = (identity?: IdentityMapEntry): string => {
+    if (identity?.crmLeadId) return `Known CRM lookup: id=${identity.crmLeadId}`;
+    if (identity?.email) return `Known CRM lookup: email=${identity.email}`;
+    if (identity?.phone) return `Known CRM lookup: phone=${identity.phone}`;
+    return 'Known CRM lookup: none';
+};
+
 const buildPrompt = (params: {
     messageHeader: string;
     text: string;
@@ -37,12 +54,17 @@ const buildPrompt = (params: {
     isGroup: boolean;
     pushName: string;
     participant: string;
+    conversationId: string;
+    identity?: IdentityMapEntry;
 }): string => [
     '[WhatsApp routed conversation]',
     `Conversation type: ${params.isGroup ? 'group' : 'direct'}`,
     `Conversation JID: ${params.remoteJid}`,
-    `Sender name: ${params.pushName}`,
+    `Conversation identity key: ${params.conversationId}`,
+    `WhatsApp display name: ${params.pushName}`,
     `Sender/participant: ${params.participant}`,
+    formatCrmLookupLine(params.identity),
+    'CRM lookup rule: use only a known phone, email, or lead ID for CRM lookups. Never use the WhatsApp display name as a CRM lookup key, and never reveal CRM/internal notes to the WhatsApp contact.',
     '',
     `${params.messageHeader} ${params.text}`,
     '',
@@ -130,10 +152,11 @@ export default function (pi: ExtensionAPI) {
     const sessionManager = new SessionManager();
     const whatsappService = new WhatsAppService(sessionManager);
     const recentsService = new RecentsService(sessionManager);
+    const identityMapService = new IdentityMapService();
     const logger = new WhatsAppPiLogger(false);
     const audioService = new AudioService(logger);
     const incomingMediaService = new IncomingMediaService(audioService, logger);
-    const menuHandler = new MenuHandler(whatsappService, sessionManager, recentsService);
+    const menuHandler = new MenuHandler(whatsappService, sessionManager, recentsService, identityMapService);
     let _ctx: ExtensionContext | undefined;
 
     const formatFooterStatus = (status: string) => {
@@ -227,6 +250,7 @@ export default function (pi: ExtensionAPI) {
             await sessionManager.addNumber(number);
         }
         await recentsService.ensureInitialized();
+        await identityMapService.ensureInitialized();
         installGracefulShutdownHandlers();
         shutdownState.__whatsappPiShutdown = {
             installed: shutdownState.__whatsappPiShutdown?.installed ?? false,
@@ -236,9 +260,7 @@ export default function (pi: ExtensionAPI) {
         };
         whatsappService.setIncomingMessageRecorder(async (message) => {
             const isGroup = message.remoteJid.endsWith('@g.us');
-            const senderNumber = isGroup
-                ? message.remoteJid
-                : `+${message.remoteJid.split('@')[0]}`;
+            const senderNumber = toConversationId(message.remoteJid);
             await recentsService.recordMessage({
                 messageId: message.id,
                 senderNumber,
@@ -303,13 +325,7 @@ export default function (pi: ExtensionAPI) {
     // Track whether send_wa_message tool already sent a reply this turn
     let toolSentToJid: string | null = null;
 
-    const toRecentSenderNumber = (recipientJid: string): string => {
-        if (recipientJid.endsWith('@g.us')) {
-            return recipientJid;
-        }
-
-        return `+${recipientJid.split('@')[0]}`;
-    };
+    const toRecentSenderNumber = (recipientJid: string): string => toConversationId(recipientJid);
 
     // Handle incoming messages by injecting them as user prompts
     whatsappService.setMessageCallback(async (m) => {
@@ -359,6 +375,15 @@ export default function (pi: ExtensionAPI) {
             return;
         }
 
+        const conversationId = toConversationId(remoteJid!);
+        if (!isGroup) {
+            await identityMapService.recordIncomingIdentity({
+                conversationId,
+                whatsappJid: remoteJid!,
+                pushName,
+            });
+        }
+        const identity = isGroup ? undefined : identityMapService.get(conversationId);
         const sessionId = routeSessionId(remoteJid!);
         const prompt = buildPrompt({
             messageHeader,
@@ -367,6 +392,8 @@ export default function (pi: ExtensionAPI) {
             isGroup,
             pushName,
             participant,
+            conversationId,
+            identity,
         });
 
         try {
@@ -381,7 +408,7 @@ export default function (pi: ExtensionAPI) {
                 await whatsappService.sendMessage(remoteJid!, reply.trim());
                 await recentsService.recordMessage({
                     messageId: `pi-router-${Date.now()}`,
-                    senderNumber: isGroup ? remoteJid! : `+${remoteJid!.split('@')[0]}`,
+                    senderNumber: conversationId,
                     senderName: 'Pi',
                     text: reply.trim(),
                     direction: 'outgoing',

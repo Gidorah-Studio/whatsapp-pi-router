@@ -8,6 +8,9 @@ import type {
 } from '../models/whatsapp.types.js';
 import { SessionManager } from './session.manager.js';
 
+const MAX_RECENT_CONVERSATIONS = 500;
+const MAX_MESSAGES_PER_CONVERSATION = 20;
+
 export interface RecentsMessageInput {
     messageId: string;
     senderNumber: string;
@@ -49,7 +52,7 @@ export class RecentsService {
             const parsed = JSON.parse(content) as Partial<RecentsStore>;
 
             this.store = {
-                conversations: Array.isArray(parsed.conversations) ? parsed.conversations.slice(0, 20) : [],
+                conversations: Array.isArray(parsed.conversations) ? parsed.conversations.slice(0, MAX_RECENT_CONVERSATIONS) : [],
                 messagesBySender: parsed.messagesBySender && typeof parsed.messagesBySender === 'object'
                     ? this.normalizeMessagesMap(parsed.messagesBySender)
                     : {},
@@ -75,7 +78,7 @@ export class RecentsService {
                 .filter((message): message is RecentConversationMessage => this.isValidMessage(message))
                 .map(message => ({ ...message, timestamp: this.normalizeTimestamp(message.timestamp) }))
                 .sort((left, right) => left.timestamp - right.timestamp)
-                .slice(-20);
+                .slice(-MAX_MESSAGES_PER_CONVERSATION);
         }
 
         return normalized;
@@ -116,7 +119,7 @@ export class RecentsService {
         }
 
         this.store.conversations = this.sortConversationsByLatestMessage(Array.from(summaries.values()))
-            .slice(0, 20);
+            .slice(0, MAX_RECENT_CONVERSATIONS);
     }
 
     private getLatestConversationMessage(messages: RecentConversationMessage[]): RecentConversationMessage | undefined {
@@ -152,8 +155,8 @@ export class RecentsService {
     }
 
     private normalizeNumber(input: string): string {
-        // Group JIDs should be stored as-is
-        if (input.endsWith('@g.us')) return input;
+        // Group and LID JIDs should be stored as-is.
+        if (input.endsWith('@g.us') || input.endsWith('@lid')) return input;
         const cleaned = input.replace(/@s\.whatsapp\.net$/, '');
         if (cleaned.startsWith('+')) {
             return cleaned;
@@ -190,7 +193,7 @@ export class RecentsService {
 
         this.store.messagesBySender[senderNumber] = filtered
             .sort((left, right) => left.timestamp - right.timestamp)
-            .slice(-20);
+            .slice(-MAX_MESSAGES_PER_CONVERSATION);
 
         const existingConversation = this.store.conversations.find(conversation => conversation.senderNumber === senderNumber);
         const summary: RecentConversationSummary = {
@@ -206,7 +209,7 @@ export class RecentsService {
         this.store.conversations = this.sortConversationsByLatestMessage([
             summary,
             ...this.store.conversations.filter(item => item.senderNumber !== senderNumber)
-        ]).slice(0, 20);
+        ]).slice(0, MAX_RECENT_CONVERSATIONS);
 
         await this.persistStore();
     }
@@ -221,7 +224,7 @@ export class RecentsService {
         const messages = this.store.messagesBySender[normalizedNumber] ?? [];
         return [...messages]
             .sort((left, right) => left.timestamp - right.timestamp)
-            .slice(-20);
+            .slice(-MAX_MESSAGES_PER_CONVERSATION);
     }
 
     async hasRecentConversations(): Promise<boolean> {

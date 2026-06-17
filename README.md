@@ -55,6 +55,12 @@ You can also enable direct-chat allow-all mode in `~/.pi/agent/extensions/whatsa
 
 `allowAllDirectChats` bypasses direct-chat allowlist checks at runtime without deleting the saved allowlist. Set it back to `false` or use the `/whatsapp` toggle to return to explicit allowlist mode. Legacy `"allowAll": true` is still accepted as an alias for direct chats only.
 
+## CRM identity mapping
+
+WhatsApp may identify direct chats with `@lid` privacy IDs instead of phone-number JIDs. The router stores local identity links in `~/.pi/agent/extensions/whatsapp-pi/identity-map.json` so a known WhatsApp conversation can be tied to a CRM phone, email, or lead ID without using display names as lookup keys.
+
+Use `/whatsapp` → `Recents` → a conversation → `Link Phone`, `Link Email`, or `Link CRM Lead ID` to add a mapping. The child Pi prompt receives the known CRM lookup key as private context. Groups remain explicit allowlist conversations and do not get CRM identity links.
+
 ## Configuration
 
 Optional environment variables:

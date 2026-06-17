@@ -8,6 +8,7 @@ import * as qrcode from 'qrcode-terminal';
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { t } from '../i18n.js';
 import { updateRouterAllowFileConfig } from '../services/router-allow.config.js';
+import { IdentityMapService, normalizeIdentityEmail, normalizePhoneDigits } from '../services/identity-map.service.js';
 
 interface HistoryOptionEntry {
     label: string;
@@ -27,7 +28,8 @@ export class MenuHandler {
     constructor(
         private readonly whatsappService: WhatsAppService,
         private readonly sessionManager: SessionManager,
-        private readonly recentsService: RecentsService
+        private readonly recentsService: RecentsService,
+        private readonly identityMapService: IdentityMapService
     ) {}
 
     async handleCommand(ctx: ExtensionCommandContext) {
@@ -464,22 +466,35 @@ export class MenuHandler {
     }
 
     private async manageRecentConversation(ctx: ExtensionCommandContext, conversation: RecentConversationSummary) {
+        await this.identityMapService.ensureInitialized();
         const displayName = this.getConversationDisplayName(conversation);
         const isGroup = SessionManager.isGroupJid(conversation.senderNumber);
         const allowedContact = isGroup
             ? this.sessionManager.getAllowedGroup(conversation.senderNumber)
             : this.sessionManager.getAllowedContact(conversation.senderNumber);
+        const identity = isGroup ? undefined : this.identityMapService.get(conversation.senderNumber);
         const title = t('menu.recents.contact.title', { displayName });
         const historyLabel = t('menu.recents.contact.history');
         const allowContactLabel = isGroup
             ? t('menu.recents.contact.allowGroup')
             : t('menu.recents.contact.allowNumber');
+        const linkPhoneLabel = t('menu.recents.contact.linkPhone');
+        const linkEmailLabel = t('menu.recents.contact.linkEmail');
+        const linkCrmLeadLabel = t('menu.recents.contact.linkCrmLead');
+        const clearIdentityLabel = t('menu.recents.contact.clearIdentity');
         const removeAliasLabel = t('menu.recents.contact.removeAlias');
         const backLabel = t('menu.recents.contact.back');
         const options: string[] = [historyLabel];
 
         if (!allowedContact) {
             options.push(allowContactLabel);
+        }
+
+        if (!isGroup) {
+            options.push(linkPhoneLabel, linkEmailLabel, linkCrmLeadLabel);
+            if (identity && (identity.phone || identity.email || identity.crmLeadId)) {
+                options.push(clearIdentityLabel);
+            }
         }
 
         if (allowedContact?.name) {
@@ -500,6 +515,28 @@ export class MenuHandler {
                 await this.sessionManager.addNumber(conversation.senderNumber, conversation.senderName);
                 ctx.ui.notify(t('menu.recents.addedToAllowList', { number: conversation.senderNumber }), 'info');
             }
+            await this.manageRecentConversation(ctx, conversation);
+            return;
+        }
+
+        if (choice === linkPhoneLabel) {
+            await this.linkRecentPhone(ctx, conversation);
+            return;
+        }
+
+        if (choice === linkEmailLabel) {
+            await this.linkRecentEmail(ctx, conversation);
+            return;
+        }
+
+        if (choice === linkCrmLeadLabel) {
+            await this.linkRecentCrmLead(ctx, conversation);
+            return;
+        }
+
+        if (choice === clearIdentityLabel) {
+            await this.identityMapService.clearLookup(conversation.senderNumber);
+            ctx.ui.notify(t('menu.recents.identityCleared', { number: conversation.senderNumber }), 'info');
             await this.manageRecentConversation(ctx, conversation);
             return;
         }
@@ -525,6 +562,57 @@ export class MenuHandler {
         }
 
         await this.manageRecents(ctx);
+    }
+
+    private async linkRecentPhone(ctx: ExtensionCommandContext, conversation: RecentConversationSummary) {
+        const input = await ctx.ui.input(t('menu.recents.identity.enterPhone', { number: conversation.senderNumber }));
+        const phone = normalizePhoneDigits(input || '');
+        if (!phone) {
+            ctx.ui.notify(t('menu.recents.identity.invalidPhone'), 'error');
+            await this.manageRecentConversation(ctx, conversation);
+            return;
+        }
+
+        await this.identityMapService.setManualMapping(conversation.senderNumber, {
+            phone,
+            pushName: conversation.senderName
+        });
+        ctx.ui.notify(t('menu.recents.identity.phoneLinked', { phone }), 'info');
+        await this.manageRecentConversation(ctx, conversation);
+    }
+
+    private async linkRecentEmail(ctx: ExtensionCommandContext, conversation: RecentConversationSummary) {
+        const input = await ctx.ui.input(t('menu.recents.identity.enterEmail', { number: conversation.senderNumber }));
+        const email = normalizeIdentityEmail(input || '');
+        if (!email || !email.includes('@')) {
+            ctx.ui.notify(t('menu.recents.identity.invalidEmail'), 'error');
+            await this.manageRecentConversation(ctx, conversation);
+            return;
+        }
+
+        await this.identityMapService.setManualMapping(conversation.senderNumber, {
+            email,
+            pushName: conversation.senderName
+        });
+        ctx.ui.notify(t('menu.recents.identity.emailLinked', { email }), 'info');
+        await this.manageRecentConversation(ctx, conversation);
+    }
+
+    private async linkRecentCrmLead(ctx: ExtensionCommandContext, conversation: RecentConversationSummary) {
+        const input = await ctx.ui.input(t('menu.recents.identity.enterCrmLead', { number: conversation.senderNumber }));
+        const crmLeadId = Number.parseInt(input || '', 10);
+        if (!Number.isInteger(crmLeadId) || crmLeadId <= 0) {
+            ctx.ui.notify(t('menu.recents.identity.invalidCrmLead'), 'error');
+            await this.manageRecentConversation(ctx, conversation);
+            return;
+        }
+
+        await this.identityMapService.setManualMapping(conversation.senderNumber, {
+            crmLeadId,
+            pushName: conversation.senderName
+        });
+        ctx.ui.notify(t('menu.recents.identity.crmLeadLinked', { crmLeadId }), 'info');
+        await this.manageRecentConversation(ctx, conversation);
     }
 
     private async sendMessageToAllowedContact(ctx: ExtensionCommandContext, contact: Contact) {

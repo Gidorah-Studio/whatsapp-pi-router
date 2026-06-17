@@ -184,6 +184,14 @@ export class WhatsAppService {
         return value;
     }
 
+    private getConversationSenderId(remoteJid: string): string {
+        if (remoteJid.endsWith('@g.us') || remoteJid.endsWith('@lid')) {
+            return remoteJid;
+        }
+
+        return this.normalizeContactNumber(remoteJid.split('@')[0]);
+    }
+
     private normalizeRecipientJid(jid: string): string {
         if (jid.includes('@')) return jid;
         const digits = jid.startsWith('+') ? jid.slice(1) : jid;
@@ -591,9 +599,7 @@ export class WhatsAppService {
             void this.prepareGroupSession(remoteJid);
         }
 
-        const senderJid = isGroup
-            ? remoteJid
-            : this.normalizeContactNumber(remoteJid.split('@')[0]);
+        const senderJid = this.getConversationSenderId(remoteJid);
 
         const pushName = message.pushName || undefined;
 
