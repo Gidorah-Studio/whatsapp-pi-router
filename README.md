@@ -59,7 +59,7 @@ You can also enable direct-chat allow-all mode in `~/.pi/agent/extensions/whatsa
 
 WhatsApp may identify direct chats with `@lid` privacy IDs instead of phone-number JIDs. The router stores local identity links in `~/.pi/agent/extensions/whatsapp-pi/identity-map.json` so a known WhatsApp conversation can be tied to a phone, email, or external record ID without using display names as stable lookup keys.
 
-Use `/whatsapp` → `Recents` → a conversation → `Link Phone`, `Link Email`, or `Link External Record ID` to add a mapping. The child Pi prompt receives the known linked identity as private context. Specific agents can decide whether an external record ID maps to a customer profile, helpdesk ticket, sales record, or another system. Groups remain explicit allowlist conversations and do not get identity links.
+Use `/whatsapp` → `Recents` → a conversation → `Link Phone`, `Link Email`, or `Link External Record ID` to add a mapping. The child Pi prompt receives the known linked identity as private context. Specific agents can decide whether an external record ID maps to a customer profile, helpdesk ticket, sales record, or another system. WhatsApp display names are still passed as weak candidates for greeting, manual review, or clarifying questions, but they are not stable lookup keys. Groups remain explicit allowlist conversations and do not get identity links.
 
 ## Configuration
 
