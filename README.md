@@ -61,6 +61,39 @@ WhatsApp may identify direct chats with `@lid` privacy IDs instead of phone-numb
 
 Use `/whatsapp` → `Recents` → a conversation → `Link Phone`, `Link Email`, or `Link External Record ID` to add a mapping. The child Pi prompt receives the known linked identity as private context. Specific agents can decide whether an external record ID maps to a customer profile, helpdesk ticket, sales record, or another system. WhatsApp display names are still passed as weak candidates for greeting, manual review, or clarifying questions, but they are not stable lookup keys. Groups remain explicit allowlist conversations and do not get identity links.
 
+## Outbound queue
+
+The router can send approved outbound direct messages from a local file-backed queue. This avoids opening an HTTP listener and keeps the connected router process as the only WhatsApp sender.
+
+Queue folders live under:
+
+```txt
+~/.pi/agent/extensions/whatsapp-pi/outbound-queue/
+  pending/
+  processing/
+  sent/
+  failed/
+```
+
+Write one JSON file to `pending/` using an atomic temp-file rename. The router claims it by rename, sends with the existing WhatsApp session, records the outgoing message in recents, then moves the result to `sent/` or `failed/`.
+
+Example job:
+
+```json
+{
+  "id": "uuid-or-safe-id",
+  "version": 1,
+  "phone": "+9613133301",
+  "text": "Hi Rani, this is Emily from GIDORAH...",
+  "source": "gidorah-whatsapp-outbound",
+  "leadId": 123,
+  "approvedBy": "operator",
+  "createdAt": "2026-06-21T00:00:00.000Z"
+}
+```
+
+`phone` is normalized to a direct WhatsApp JID. `jid` or `recipientJid` may be used instead for direct WhatsApp JIDs. Group JIDs are rejected by the queue.
+
 ## Configuration
 
 Optional environment variables:
@@ -70,6 +103,7 @@ Optional environment variables:
 - `WHATSAPP_ROUTER_ALLOW_NUMBERS` — comma-separated numbers/JIDs to force-add to the allowlist at startup.
 - `WHATSAPP_ROUTER_ALLOW_ALL` or `WHATSAPP_ROUTER_ALLOW_ALL_DIRECT_CHATS` — set to `true`, `1`, `yes`, `on`, `all`, or `*` to route every inbound direct chat without allowlist checks.
 - `WHATSAPP_ROUTER_ALLOW_ALL_GROUPS` — set to a truthy value to route every inbound group without allowlist checks. Groups are explicit-only by default.
+- `WHATSAPP_ROUTER_OUTBOUND_POLL_MS` — outbound queue polling interval in milliseconds. Defaults to `2000`; values below `500` are ignored.
 
 ## Development
 

@@ -20,6 +20,11 @@ export interface StoragePaths {
     logDir: string;
     logPath: string;
     mediaDir: string;
+    outboundQueueDir: string;
+    outboundPendingDir: string;
+    outboundProcessingDir: string;
+    outboundSentDir: string;
+    outboundFailedDir: string;
 }
 
 export function createStoragePaths(root = getDefaultStorageRoot(), legacyRoot = getDefaultLegacyStorageRoot()): StoragePaths {
@@ -32,7 +37,12 @@ export function createStoragePaths(root = getDefaultStorageRoot(), legacyRoot = 
         recentsPath: join(root, 'recents', 'recents.json'),
         logDir: root,
         logPath: join(root, 'whatsapp-pi.log'),
-        mediaDir: join(root, 'whatsapp-medias')
+        mediaDir: join(root, 'whatsapp-medias'),
+        outboundQueueDir: join(root, 'outbound-queue'),
+        outboundPendingDir: join(root, 'outbound-queue', 'pending'),
+        outboundProcessingDir: join(root, 'outbound-queue', 'processing'),
+        outboundSentDir: join(root, 'outbound-queue', 'sent'),
+        outboundFailedDir: join(root, 'outbound-queue', 'failed')
     };
 }
 

@@ -17,6 +17,7 @@ import { ReactionSender } from './services/reaction.sender.js';
 import { initI18n, t } from './i18n.js';
 import { loadRouterAllowConfig } from './services/router-allow.config.js';
 import { IdentityMapService, type IdentityMapEntry } from './services/identity-map.service.js';
+import { OutboundQueueService } from './services/outbound-queue.service.js';
 
 const shutdownState = globalThis as typeof globalThis & {
     __whatsappPiShutdown?: {
@@ -159,6 +160,7 @@ export default function (pi: ExtensionAPI) {
     const recentsService = new RecentsService(sessionManager);
     const identityMapService = new IdentityMapService();
     const logger = new WhatsAppPiLogger(false);
+    const outboundQueueService = new OutboundQueueService(whatsappService, recentsService, logger);
     const audioService = new AudioService(logger);
     const incomingMediaService = new IncomingMediaService(audioService, logger);
     const menuHandler = new MenuHandler(whatsappService, sessionManager, recentsService, identityMapService);
@@ -256,10 +258,12 @@ export default function (pi: ExtensionAPI) {
         }
         await recentsService.ensureInitialized();
         await identityMapService.ensureInitialized();
+        await outboundQueueService.start();
         installGracefulShutdownHandlers();
         shutdownState.__whatsappPiShutdown = {
             installed: shutdownState.__whatsappPiShutdown?.installed ?? false,
             stop: async () => {
+                outboundQueueService.stop();
                 await whatsappService.stop();
             }
         };
@@ -732,6 +736,7 @@ export default function (pi: ExtensionAPI) {
 
     pi.on("session_shutdown", async () => {
         logger.log("[WhatsApp-Pi] Session shutdown detected. Stopping WhatsApp service...");
+        outboundQueueService.stop();
         await whatsappService.stop();
     });
 }
