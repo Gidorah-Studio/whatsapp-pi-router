@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { createStoragePaths } from './storage-path.js';
 import { WhatsAppPiLogger } from './whatsapp-pi.logger.js';
+import { createOpenRouterAudioTranscriber } from './openrouter-audio.transcriber.js';
 import { tryCreateWhisperCppAudioTranscriber, type AudioTranscriber } from './whisper-cpp-audio.transcriber.js';
 import { t } from '../i18n.js';
 
@@ -17,14 +18,14 @@ type AudioPhase = 'download' | 'write' | 'convert' | 'whisper' | 'total';
 export class AudioService {
     private readonly mediaDir = createStoragePaths().mediaDir;
     private readonly logger: AudioLogger;
-    private readonly whisperCppTranscriber: AudioTranscriber | null;
+    private readonly audioTranscriber: AudioTranscriber | null;
     private readonly ffmpegCommands = process.platform === 'win32' ? ['ffmpeg', 'ffmpeg.exe'] : ['ffmpeg'];
 
-    constructor(logger: AudioLogger = new WhatsAppPiLogger(false), whisperCppTranscriber?: AudioTranscriber | null) {
+    constructor(logger: AudioLogger = new WhatsAppPiLogger(false), audioTranscriber?: AudioTranscriber | null) {
         this.logger = logger;
-        this.whisperCppTranscriber = whisperCppTranscriber === undefined
-            ? tryCreateWhisperCppAudioTranscriber(logger)
-            : whisperCppTranscriber;
+        this.audioTranscriber = audioTranscriber === undefined
+            ? createConfiguredAudioTranscriber(logger)
+            : audioTranscriber;
 
         if (!existsSync(this.mediaDir)) {
             mkdir(this.mediaDir, { recursive: true }).catch(() => {});
@@ -58,13 +59,13 @@ export class AudioService {
                 await this.convertToWav(inputPath, wavPath);
             });
 
-            const whisperCppTranscriber = this.whisperCppTranscriber;
-            if (!whisperCppTranscriber) {
-                throw new Error('whisper-cpp-node unavailable');
+            const audioTranscriber = this.audioTranscriber;
+            if (!audioTranscriber) {
+                throw new Error('No audio transcription provider available');
             }
 
             return await this.measurePhase('whisper', async () => {
-                const transcription = await whisperCppTranscriber.transcribe(wavPath);
+                const transcription = await audioTranscriber.transcribe(wavPath);
                 const text = String(transcription ?? '').trim();
                 return text || t('audio.emptyTranscription');
             });
@@ -130,4 +131,67 @@ export class AudioService {
             || anyError.code === 9009
             || /not found|not recognized/i.test(message);
     }
+}
+
+function createConfiguredAudioTranscriber(logger: AudioLogger): AudioTranscriber | null {
+    const provider = (process.env.STT_PROVIDER || 'local').trim().toLowerCase();
+
+    if (provider === 'openrouter') {
+        const localFallback = tryCreateWhisperCppAudioTranscriber(logger);
+        try {
+            const openRouterTranscriber = createOpenRouterAudioTranscriber(logger);
+            if (!localFallback) {
+                return openRouterTranscriber;
+            }
+
+            return withFallback(openRouterTranscriber, localFallback, logger);
+        } catch (error) {
+            logger.error(`[WhatsApp-Pi] OpenRouter STT unavailable: ${errorMessage(error)}`);
+            if (localFallback) {
+                logger.log('[WhatsApp-Pi] Falling back to local whisper-cpp-node STT.');
+                return localFallback;
+            }
+
+            return createFailingAudioTranscriber(error);
+        }
+    }
+
+    if (!isLocalWhisperProvider(provider)) {
+        logger.error(`[WhatsApp-Pi] Unknown STT_PROVIDER="${provider}". Falling back to local whisper-cpp-node STT.`);
+    }
+
+    return tryCreateWhisperCppAudioTranscriber(logger);
+}
+
+function isLocalWhisperProvider(provider: string): boolean {
+    return provider === ''
+        || provider === 'local'
+        || provider === 'whisper'
+        || provider === 'whisper-cpp'
+        || provider === 'whisper_cpp';
+}
+
+function withFallback(primary: AudioTranscriber, fallback: AudioTranscriber, logger: AudioLogger): AudioTranscriber {
+    return {
+        async transcribe(inputPath: string): Promise<string> {
+            try {
+                return await primary.transcribe(inputPath);
+            } catch (error) {
+                logger.error(`[WhatsApp-Pi] Primary STT provider failed, falling back to local whisper-cpp-node: ${errorMessage(error)}`);
+                return await fallback.transcribe(inputPath);
+            }
+        }
+    };
+}
+
+function createFailingAudioTranscriber(error: unknown): AudioTranscriber {
+    return {
+        async transcribe(): Promise<string> {
+            throw error instanceof Error ? error : new Error(String(error));
+        }
+    };
+}
+
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }

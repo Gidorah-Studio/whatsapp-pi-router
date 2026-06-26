@@ -55,6 +55,24 @@ You can also enable direct-chat allow-all mode in `~/.pi/agent/extensions/whatsa
 
 `allowAllDirectChats` bypasses direct-chat allowlist checks at runtime without deleting the saved allowlist. Set it back to `false` or use the `/whatsapp` toggle to return to explicit allowlist mode. Legacy `"allowAll": true` is still accepted as an alias for direct chats only.
 
+## Speech-to-text for WhatsApp voice notes
+
+Incoming WhatsApp voice/audio messages are transcribed before they are routed to the child Pi session.
+
+By default, the router uses local `whisper-cpp-node` transcription. That path also needs `ffmpeg` so incoming audio can be converted to WAV before transcription.
+
+To use OpenRouter instead, load these environment variables before starting Pi:
+
+```bash
+export STT_PROVIDER="openrouter"
+export OPENROUTER_API_KEY="sk-or-..."
+export STT_MODEL="openai/whisper-1"
+```
+
+`STT_PROVIDER` may be left unset, or set to `local`, `whisper`, `whisper-cpp`, or `whisper_cpp`, to use local whisper-cpp transcription. When `STT_PROVIDER=openrouter`, the router sends the converted WAV file to OpenRouter's audio transcription endpoint using `STT_MODEL` or `openai/whisper-1` by default. If OpenRouter fails and local whisper-cpp is available, the router falls back to local transcription.
+
+No text-to-speech voice replies are implemented yet; WhatsApp replies are still sent as text.
+
 ## Identity mapping
 
 WhatsApp may identify direct chats with `@lid` privacy IDs instead of phone-number JIDs. The router stores local identity links in `~/.pi/agent/extensions/whatsapp-pi/identity-map.json` so a known WhatsApp conversation can be tied to a phone, email, or external record ID without using display names as stable lookup keys.
@@ -104,6 +122,9 @@ Optional environment variables:
 - `WHATSAPP_ROUTER_ALLOW_ALL` or `WHATSAPP_ROUTER_ALLOW_ALL_DIRECT_CHATS` — set to `true`, `1`, `yes`, `on`, `all`, or `*` to route every inbound direct chat without allowlist checks.
 - `WHATSAPP_ROUTER_ALLOW_ALL_GROUPS` — set to a truthy value to route every inbound group without allowlist checks. Groups are explicit-only by default.
 - `WHATSAPP_ROUTER_OUTBOUND_POLL_MS` — outbound queue polling interval in milliseconds. Defaults to `2000`; values below `500` are ignored.
+- `STT_PROVIDER` — speech-to-text provider for inbound WhatsApp voice/audio. Defaults to local whisper-cpp. Set to `openrouter` to use OpenRouter.
+- `OPENROUTER_API_KEY` — required when `STT_PROVIDER=openrouter`.
+- `STT_MODEL` — OpenRouter STT model. Defaults to `openai/whisper-1`.
 
 ## Development
 
