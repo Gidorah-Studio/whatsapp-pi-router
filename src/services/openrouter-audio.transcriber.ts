@@ -1,6 +1,5 @@
 import https from 'node:https';
 import { readFile } from 'node:fs/promises';
-import { basename } from 'node:path';
 import type { WhatsAppPiLogger } from './whatsapp-pi.logger.js';
 import type { AudioTranscriber } from './whisper-cpp-audio.transcriber.js';
 
@@ -22,22 +21,17 @@ export function createOpenRouterAudioTranscriber(logger: AudioLogger): AudioTran
         async transcribe(inputPath: string): Promise<string> {
             logger.log(`[WhatsApp-Pi] OpenRouter STT transcribe with ${model}`);
             const audioBuffer = await readFile(inputPath);
-            const boundary = `----whatsapp-pi-router-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-            const body = buildMultipartBody(boundary, [
-                { name: 'model', value: model },
-                { name: 'response_format', value: 'json' },
-                {
-                    name: 'file',
-                    fileName: basename(inputPath),
-                    contentType: 'audio/wav',
-                    value: audioBuffer
+            const body = JSON.stringify({
+                model,
+                input_audio: {
+                    data: audioBuffer.toString('base64'),
+                    format: 'wav'
                 }
-            ]);
+            });
 
-            const response = await postMultipartJson({
+            const response = await postJson({
                 url: OPENROUTER_AUDIO_TRANSCRIPTIONS_URL,
                 apiKey,
-                boundary,
                 body
             });
 
@@ -46,50 +40,13 @@ export function createOpenRouterAudioTranscriber(logger: AudioLogger): AudioTran
     };
 }
 
-type MultipartPart =
-    | { name: string; value: string }
-    | { name: string; fileName: string; contentType: string; value: Buffer };
-
-function buildMultipartBody(boundary: string, parts: MultipartPart[]): Buffer {
-    const chunks: Buffer[] = [];
-
-    for (const part of parts) {
-        if (!('fileName' in part)) {
-            chunks.push(Buffer.from(
-                `--${boundary}\r\n`
-                + `Content-Disposition: form-data; name="${escapeHeaderValue(part.name)}"\r\n\r\n`
-                + `${part.value}\r\n`,
-                'utf8'
-            ));
-            continue;
-        }
-
-        chunks.push(Buffer.from(
-            `--${boundary}\r\n`
-            + `Content-Disposition: form-data; name="${escapeHeaderValue(part.name)}"; filename="${escapeHeaderValue(part.fileName)}"\r\n`
-            + `Content-Type: ${part.contentType}\r\n\r\n`,
-            'utf8'
-        ));
-        chunks.push(part.value);
-        chunks.push(Buffer.from('\r\n', 'utf8'));
-    }
-
-    chunks.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
-    return Buffer.concat(chunks);
-}
-
-function escapeHeaderValue(value: string): string {
-    return value.replace(/["\\\r\n]/g, '_');
-}
-
-interface PostMultipartJsonOptions {
+interface PostJsonOptions {
     url: string;
     apiKey: string;
-    boundary: string;
-    body: Buffer;
+    body: string;
 }
 
-async function postMultipartJson(options: PostMultipartJsonOptions): Promise<unknown> {
+async function postJson(options: PostJsonOptions): Promise<unknown> {
     const url = new URL(options.url);
     if (url.protocol !== 'https:') {
         throw new Error(`OpenRouter STT URL must use https: ${url.protocol}`);
@@ -101,8 +58,8 @@ async function postMultipartJson(options: PostMultipartJsonOptions): Promise<unk
             timeout: REQUEST_TIMEOUT_MS,
             headers: {
                 Authorization: `Bearer ${options.apiKey}`,
-                'Content-Type': `multipart/form-data; boundary=${options.boundary}`,
-                'Content-Length': String(options.body.length),
+                'Content-Type': 'application/json',
+                'Content-Length': String(Buffer.byteLength(options.body)),
                 'HTTP-Referer': 'https://github.com/x4484/whatsapp-pi-router',
                 'X-Title': 'whatsapp-pi-router'
             }
@@ -144,9 +101,12 @@ function extractTranscriptionText(response: unknown): string {
         throw new Error('OpenRouter STT returned an empty response');
     }
 
-    const payload = response as { text?: unknown; error?: { message?: unknown } };
-    if (payload.error?.message) {
-        throw new Error(`OpenRouter STT failed: ${String(payload.error.message)}`);
+    const payload = response as { text?: unknown; error?: { message?: unknown } | string };
+    if (payload.error) {
+        const message = typeof payload.error === 'string'
+            ? payload.error
+            : String(payload.error.message ?? 'unknown error');
+        throw new Error(`OpenRouter STT failed: ${message}`);
     }
 
     const text = typeof payload.text === 'string' ? payload.text.trim() : '';

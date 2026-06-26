@@ -69,7 +69,7 @@ export OPENROUTER_API_KEY="sk-or-..."
 export STT_MODEL="openai/whisper-1"
 ```
 
-`STT_PROVIDER` may be left unset, or set to `local`, `whisper`, `whisper-cpp`, or `whisper_cpp`, to use local whisper-cpp transcription. When `STT_PROVIDER=openrouter`, the router sends the converted WAV file to OpenRouter's audio transcription endpoint using `STT_MODEL` or `openai/whisper-1` by default. If OpenRouter fails and local whisper-cpp is available, the router falls back to local transcription.
+`STT_PROVIDER` may be left unset, or set to `local`, `whisper`, `whisper-cpp`, or `whisper_cpp`, to use local whisper-cpp transcription. When `STT_PROVIDER=openrouter`, the router sends the converted WAV file as base64 JSON to OpenRouter's audio transcription endpoint using `STT_MODEL` or `openai/whisper-1` by default. If OpenRouter fails and local whisper-cpp is available, the router falls back to local transcription.
 
 No text-to-speech voice replies are implemented yet; WhatsApp replies are still sent as text.
 
