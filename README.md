@@ -73,11 +73,13 @@ export STT_MODEL="openai/whisper-1"
 
 No text-to-speech voice replies are implemented yet; WhatsApp replies are still sent as text.
 
-## Identity mapping
+## Identity mapping and LID routing
 
-WhatsApp may identify direct chats with `@lid` privacy IDs instead of phone-number JIDs. The router stores local identity links in `~/.pi/agent/extensions/whatsapp-pi/identity-map.json` so a known WhatsApp conversation can be tied to a phone, email, or external record ID without using display names as stable lookup keys.
+WhatsApp may identify direct chats with `@lid` privacy IDs instead of phone-number JIDs. The router runs on Baileys v7, records Baileys `lid-mapping.update` and `chats.phoneNumberShare` events, and stores local identity links in `~/.pi/agent/extensions/whatsapp-pi/identity-map.json` so a known WhatsApp conversation can be tied to a LID, phone, email, or external record ID without using display names as stable lookup keys.
 
-Use `/whatsapp` → `Recents` → a conversation → `Link Phone`, `Link Email`, or `Link External Record ID` to add a mapping. The child Pi prompt receives the known linked identity as private context. Specific agents can decide whether an external record ID maps to a customer profile, helpdesk ticket, sales record, or another system. WhatsApp display names are still passed as weak candidates for greeting, manual review, or clarifying questions, but they are not stable lookup keys. Groups remain explicit allowlist conversations and do not get identity links.
+For direct chats, LID is preferred as the reply identity when WhatsApp provides one. If an incoming message includes both a phone JID and a LID alternate, the router stores the PN↔LID mapping, routes the child Pi session by the LID, and sends replies to the LID. If a manual outbound send starts from a phone JID, Baileys' LID mapping store is checked before send and the message is upgraded to the mapped LID when available.
+
+Use `/whatsapp` → `Recents` → a conversation → `Link Phone`, `Link Email`, or `Link External Record ID` to add business-system context. The child Pi prompt receives the known linked identity as private context. Specific agents can decide whether an external record ID maps to a customer profile, helpdesk ticket, sales record, or another system. WhatsApp display names are still passed as weak candidates for greeting, manual review, or clarifying questions, but they are not stable lookup keys. Groups remain explicit allowlist conversations and do not get identity links.
 
 ## Outbound queue
 

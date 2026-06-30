@@ -164,6 +164,7 @@ export class OutboundQueueService {
         try {
             this.logger.log(`[WhatsApp-Pi-Router] Sending outbound queue job ${validated.id} to ${validated.recipientJid}`);
             const result = await this.whatsappService.sendMessage(validated.recipientJid, validated.text);
+            const actualRecipientJid = result.recipientJid ?? validated.recipientJid;
 
             if (!result.success) {
                 await this.completeJob(processingPath, this.storagePaths.outboundFailedDir, {
@@ -180,7 +181,7 @@ export class OutboundQueueService {
 
             await this.recentsService.recordMessage({
                 messageId: result.messageId ?? `outbound-${validated.id}-${Date.now()}`,
-                senderNumber: validated.recentSenderNumber,
+                senderNumber: this.toRecentSenderNumber(actualRecipientJid),
                 senderName: typeof validated.job.contactName === 'string' ? validated.job.contactName : undefined,
                 text: validated.text,
                 direction: 'outgoing',
@@ -191,7 +192,8 @@ export class OutboundQueueService {
                 ...validated.job,
                 id: validated.id,
                 status: 'sent',
-                recipientJid: validated.recipientJid,
+                recipientJid: actualRecipientJid,
+                requestedRecipientJid: validated.recipientJid,
                 sentAt: new Date().toISOString(),
                 result,
             });

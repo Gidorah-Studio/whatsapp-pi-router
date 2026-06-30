@@ -32,6 +32,7 @@ export interface MessageResult {
     messageId?: string;
     error?: string;
     attempts: number;
+    recipientJid?: string;
 }
 
 export class WhatsAppError extends Error {
@@ -93,6 +94,7 @@ export interface ReplySendResult {
     messageId?: string;
     error?: string;
     attempts: number;
+    recipientJid?: string;
 }
 
 export interface RecentsStore {

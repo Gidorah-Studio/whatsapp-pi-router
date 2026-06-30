@@ -16,7 +16,7 @@ import { WhatsAppPiLogger } from './services/whatsapp-pi.logger.js';
 import { ReactionSender } from './services/reaction.sender.js';
 import { initI18n, t } from './i18n.js';
 import { loadRouterAllowConfig } from './services/router-allow.config.js';
-import { IdentityMapService, type IdentityMapEntry } from './services/identity-map.service.js';
+import { IdentityMapService, isLidJid, isPhoneJid, normalizeDirectJid, type IdentityMapEntry } from './services/identity-map.service.js';
 import { OutboundQueueService } from './services/outbound-queue.service.js';
 
 const shutdownState = globalThis as typeof globalThis & {
@@ -41,6 +41,30 @@ const toConversationId = (remoteJid: string): string => {
     return /^\d+$/.test(localPart) ? `+${localPart}` : remoteJid;
 };
 
+const firstNormalized = (...values: Array<string | undefined>): string | undefined => {
+    for (const value of values) {
+        const normalized = normalizeDirectJid(value);
+        if (normalized) return normalized;
+    }
+    return undefined;
+};
+
+const firstLidJid = (...values: Array<string | undefined>): string | undefined => {
+    for (const value of values) {
+        const normalized = normalizeDirectJid(value);
+        if (isLidJid(normalized)) return normalized;
+    }
+    return undefined;
+};
+
+const firstPhoneJid = (...values: Array<string | undefined>): string | undefined => {
+    for (const value of values) {
+        const normalized = normalizeDirectJid(value);
+        if (isPhoneJid(normalized)) return normalized;
+    }
+    return undefined;
+};
+
 const formatLinkedIdentityLine = (identity?: IdentityMapEntry): string => {
     const values = [
         identity?.externalRecordId ? `externalRecordId=${identity.externalRecordId}` : undefined,
@@ -57,6 +81,8 @@ const buildPrompt = (params: {
     messageHeader: string;
     text: string;
     remoteJid: string;
+    replyJid: string;
+    alternateJid?: string;
     isGroup: boolean;
     pushName: string;
     participant: string;
@@ -66,6 +92,8 @@ const buildPrompt = (params: {
     '[WhatsApp routed conversation]',
     `Conversation type: ${params.isGroup ? 'group' : 'direct'}`,
     `Conversation JID: ${params.remoteJid}`,
+    `Reply JID: ${params.replyJid}`,
+    ...(params.alternateJid ? [`Alternate WhatsApp JID: ${params.alternateJid}`] : []),
     `Conversation identity key: ${params.conversationId}`,
     `WhatsApp display name candidate: ${params.pushName}`,
     `Sender/participant: ${params.participant}`,
@@ -234,6 +262,9 @@ export default function (pi: ExtensionAPI) {
         whatsappService.setStatusCallback((status) => {
             ctx.ui.setStatus('whatsapp', formatFooterStatus(status));
         });
+        whatsappService.setLidMappingCallback(async ({ lid, pn }) => {
+            await identityMapService.recordLidPnMapping(lid, pn);
+        });
 
         // Set up group binding if configured
         const boundGroupJid = (pi.getFlag("whatsapp-group") as string) || "";
@@ -342,15 +373,28 @@ export default function (pi: ExtensionAPI) {
         if (!msg?.message) return;
 
         const remoteJid = msg.key.remoteJid;
-        const isGroup = remoteJid?.endsWith('@g.us') || false;
-        const participant = isGroup ? (msg.key.participant?.split('@')[0] || 'unknown') : (remoteJid?.split('@')[0] || 'unknown');
-        const sender = remoteJid?.split('@')[0] || "unknown";
+        if (!remoteJid) return;
+
+        const isGroup = remoteJid.endsWith('@g.us');
+        const lidJid = isGroup
+            ? undefined
+            : firstLidJid(msg.key.remoteJid, msg.key.remoteJidAlt, msg.key.senderLid, msg.key.previousRemoteJid);
+        const phoneJid = isGroup
+            ? undefined
+            : firstPhoneJid(msg.key.remoteJid, msg.key.remoteJidAlt, msg.key.senderPn, msg.key.participantAlt);
+        const alternateJid = isGroup
+            ? undefined
+            : firstNormalized(msg.key.remoteJidAlt, msg.key.senderPn, msg.key.senderLid, msg.key.previousRemoteJid);
+        const replyJid = isGroup ? remoteJid : (lidJid ?? normalizeDirectJid(remoteJid) ?? remoteJid);
+        const participantJid = isGroup ? (msg.key.participantAlt || msg.key.participant) : (phoneJid ?? lidJid ?? remoteJid);
+        const participant = participantJid?.split('@')[0] || 'unknown';
+        const sender = (phoneJid ?? lidJid ?? remoteJid).split('@')[0] || "unknown";
         const pushName = msg.pushName || "WhatsApp User";
 
-        // Mark as read and start typing indicator immediately
-        if (remoteJid && msg.key.id) {
+        // Mark as read on the actual incoming chat key, then type in the reply thread.
+        if (msg.key.id) {
             whatsappService.markRead(remoteJid, msg.key.id, msg.key.fromMe);
-            whatsappService.sendPresence(remoteJid, 'composing');
+            whatsappService.sendPresence(replyJid, 'composing');
         }
 
         // Reset tool-sent flag for this new incoming message
@@ -371,33 +415,46 @@ export default function (pi: ExtensionAPI) {
 
         logger.log(`[WhatsApp-Pi] ${messageHeader} ${text}`);
 
+        if (!isGroup && lidJid && phoneJid) {
+            await Promise.all([
+                whatsappService.storeLidPnMapping(lidJid, phoneJid),
+                identityMapService.recordLidPnMapping(lidJid, phoneJid),
+            ]);
+        }
+
         // Handle commands before dispatching to the routed child Pi session.
         if (text.trim().toLowerCase().startsWith('/compact')) {
             logger.log(`[WhatsApp-Pi] Session compact requested by ${pushName}.`);
-            await whatsappService.sendMessage(remoteJid!, "Per-conversation sessions are compacted by their own Pi runs. ✅");
+            await whatsappService.sendMessage(replyJid, "Per-conversation sessions are compacted by their own Pi runs. ✅");
             return;
         }
 
         if (text.trim().toLowerCase().startsWith('/abort')) {
             logger.log(`[WhatsApp-Pi] Abort requested by ${pushName}.`);
-            await whatsappService.sendMessage(remoteJid!, "There is no active routed Pi turn to abort from WhatsApp yet. ✅");
+            await whatsappService.sendMessage(replyJid, "There is no active routed Pi turn to abort from WhatsApp yet. ✅");
             return;
         }
 
-        const conversationId = toConversationId(remoteJid!);
+        const conversationId = toConversationId(replyJid);
         if (!isGroup) {
             await identityMapService.recordIncomingIdentity({
                 conversationId,
-                whatsappJid: remoteJid!,
+                whatsappJid: replyJid,
+                alternateJid,
+                lidJid,
+                phoneJid,
                 pushName,
+                addressingMode: msg.key.addressingMode,
             });
         }
         const identity = isGroup ? undefined : identityMapService.get(conversationId);
-        const sessionId = routeSessionId(remoteJid!);
+        const sessionId = routeSessionId(replyJid);
         const prompt = buildPrompt({
             messageHeader,
             text,
-            remoteJid: remoteJid!,
+            remoteJid,
+            replyJid,
+            alternateJid,
             isGroup,
             pushName,
             participant,
@@ -406,7 +463,7 @@ export default function (pi: ExtensionAPI) {
         });
 
         try {
-            logger.log(`[WhatsApp-Pi-Router] Dispatching ${remoteJid} to Pi session ${sessionId}`);
+            logger.log(`[WhatsApp-Pi-Router] Dispatching ${remoteJid} via reply ${replyJid} to Pi session ${sessionId}`);
             const reply = await runPiForConversation({
                 sessionId,
                 prompt,
@@ -414,7 +471,7 @@ export default function (pi: ExtensionAPI) {
                 ...(imageBuffer && imageMimeType ? { imageBuffer, imageMimeType } : {}),
             });
             if (reply.trim()) {
-                await whatsappService.sendMessage(remoteJid!, reply.trim());
+                await whatsappService.sendMessage(replyJid, reply.trim());
                 await recentsService.recordMessage({
                     messageId: `pi-router-${Date.now()}`,
                     senderNumber: conversationId,
@@ -424,12 +481,12 @@ export default function (pi: ExtensionAPI) {
                     timestamp: Date.now(),
                 });
             } else {
-                await whatsappService.sendMessage(remoteJid!, "I could not produce a reply for that message.");
+                await whatsappService.sendMessage(replyJid, "I could not produce a reply for that message.");
             }
         } catch (error) {
             logger.error('[WhatsApp-Pi-Router] routed Pi reply failed:', error);
             await whatsappService.sendMessage(
-                remoteJid!,
+                replyJid,
                 `Sorry, the routed Pi session failed: ${error instanceof Error ? error.message : String(error)}`,
             );
         }
@@ -480,13 +537,14 @@ export default function (pi: ExtensionAPI) {
 
             const outboundJid = whatsappService.resolveOutboundRecipientJid(resolvedJid);
             const result = await whatsappService.sendMessage(outboundJid, message);
+            const actualOutboundJid = result.recipientJid ?? outboundJid;
 
             if (result.success) {
                 // Mark that tool already sent to this JID — prevents message_end from re-sending
-                toolSentToJid = outboundJid;
+                toolSentToJid = actualOutboundJid;
                 await recentsService.recordMessage({
                     messageId: result.messageId!,
-                    senderNumber: toRecentSenderNumber(outboundJid),
+                    senderNumber: toRecentSenderNumber(actualOutboundJid),
                     text: message,
                     direction: 'outgoing',
                     timestamp: Date.now()
@@ -509,7 +567,7 @@ export default function (pi: ExtensionAPI) {
             return {
                 isError: !result.success,
                 details: undefined,
-                content: [{ type: "text" as const, text: JSON.stringify({ success: result.success, messageId: result.messageId, error: result.error, attempts: result.attempts }) }]
+                content: [{ type: "text" as const, text: JSON.stringify({ success: result.success, messageId: result.messageId, error: result.error, attempts: result.attempts, recipientJid: result.recipientJid }) }]
             };
         }
     });
@@ -715,10 +773,11 @@ export default function (pi: ExtensionAPI) {
             if (outboundJid && text) {
                 try {
                     const result = await whatsappService.sendMessage(outboundJid, text);
+                    const actualOutboundJid = result.recipientJid ?? outboundJid;
                     if (result.success) {
                         await recentsService.recordMessage({
                             messageId: result.messageId ?? `${Date.now()}`,
-                            senderNumber: toRecentSenderNumber(outboundJid),
+                            senderNumber: toRecentSenderNumber(actualOutboundJid),
                             text,
                             direction: 'outgoing',
                             timestamp: Date.now()

@@ -50,7 +50,7 @@ const buildReplyTitle = (selectedMessage: SelectedMessageContext): string => {
 };
 
 const toRecentSenderNumber = (recipientJid: string): string => {
-    if (recipientJid.endsWith('@g.us')) {
+    if (recipientJid.endsWith('@g.us') || recipientJid.endsWith('@lid')) {
         return recipientJid;
     }
 
@@ -93,9 +93,10 @@ export async function showMessageReplyView(
             );
 
             if (result.success) {
+                const actualRecipientJid = result.recipientJid ?? recipientJid;
                 await props.recentsService.recordMessage({
                     messageId: result.messageId ?? `${Date.now()}`,
-                    senderNumber: toRecentSenderNumber(recipientJid),
+                    senderNumber: toRecentSenderNumber(actualRecipientJid),
                     senderName: props.selectedMessage.senderName,
                     text: draft.text,
                     direction: 'outgoing',

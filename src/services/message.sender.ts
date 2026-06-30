@@ -80,7 +80,8 @@ export class MessageSender {
                 return {
                     success: true,
                     messageId: response?.key?.id,
-                    attempts
+                    attempts,
+                    recipientJid: request.recipientJid
                 };
             } catch (error: unknown) {
                 lastError = error;
@@ -113,7 +114,8 @@ export class MessageSender {
         return {
             success: false,
             error: lastError instanceof Error ? lastError.message : t('message.sender.unknownError'),
-            attempts
+            attempts,
+            recipientJid: request.recipientJid
         };
     }
 }

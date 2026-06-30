@@ -37,8 +37,14 @@ interface ConnectionUpdateEvent {
 interface IncomingMessageKey {
     id?: string;
     remoteJid?: string;
+    remoteJidAlt?: string;
     fromMe?: boolean;
     participant?: string;
+    participantAlt?: string;
+    senderLid?: string;
+    senderPn?: string;
+    previousRemoteJid?: string;
+    addressingMode?: string;
 }
 
 interface IncomingMessageContextInfo {
@@ -75,21 +81,46 @@ interface MessagesUpsertEvent {
     messages?: IncomingMessageLike[];
 }
 
+interface LidMappingPayload {
+    lid?: string;
+    pn?: string;
+}
+
+interface PhoneNumberSharePayload {
+    lid?: string;
+    jid?: string;
+}
+
+interface MessageUpdatePayload {
+    key?: { id?: string; remoteJid?: string; fromMe?: boolean };
+    update?: { status?: unknown };
+}
+
+interface MessageReceiptPayload {
+    key?: { id?: string; remoteJid?: string; fromMe?: boolean };
+    receipt?: unknown;
+}
+
 interface WhatsAppSocketLike {
     user?: { id?: string; lid?: string };
     ev: {
-        on(event: 'connection.update', handler: (update: ConnectionUpdateEvent) => void | Promise<void>): void;
-        on(event: 'creds.update', handler: () => void | Promise<void>): void;
-        on(event: 'messages.upsert', handler: (payload: MessagesUpsertEvent) => void | Promise<void>): void;
-        removeAllListeners(event: 'connection.update' | 'creds.update' | 'messages.upsert'): void;
+        on(event: string, handler: (payload: any) => void | Promise<void>): void;
+        removeAllListeners(event: string): void;
     };
-    end(reason?: unknown): void;
+    end(reason?: unknown): void | Promise<void>;
     logout(): Promise<void>;
     sendMessage(jid: string, content: { text: string }): Promise<{ key?: { id?: string } } | undefined>;
     sendPresenceUpdate(presence: 'composing' | 'recording' | 'paused', jid: string): Promise<void>;
     readMessages(messages: Array<{ remoteJid: string; id: string; fromMe: boolean }>): Promise<void>;
     groupMetadata(jid: string): Promise<{ id: string; subject: string; participants: Array<{ id: string }> }>;
     groupFetchAllParticipating(): Promise<Record<string, { id: string; subject: string; participants: Array<{ id: string }> }>>;
+    signalRepository?: {
+        lidMapping?: {
+            getLIDForPN(pn: string): Promise<string | null>;
+            getPNForLID(lid: string): Promise<string | null>;
+            storeLIDPNMappings(mappings: Array<{ lid: string; pn: string }>): Promise<void>;
+        };
+    };
 }
 
 interface LastDisconnectLike {
@@ -121,6 +152,7 @@ export class WhatsAppService {
     private onQRCode?: (qr: string) => void;
     private onMessage?: (m: MessagesUpsertEvent) => void;
     private onStatusUpdate?: (status: string) => void;
+    private onLidMapping?: (mapping: { lid: string; pn: string }) => void | Promise<void>;
     private lastRemoteJid: string | null = null;
     private qrWasShown = false;
     private boundGroupJid: string | null = null;
@@ -192,10 +224,84 @@ export class WhatsAppService {
         return this.normalizeContactNumber(remoteJid.split('@')[0]);
     }
 
+    private getDirectSenderCandidates(message: IncomingMessageLike, remoteJid: string): string[] {
+        const rawCandidates = [
+            remoteJid,
+            message.key.remoteJidAlt,
+            message.key.senderPn,
+            message.key.senderLid,
+            message.key.previousRemoteJid,
+        ];
+        const candidates = new Set<string>();
+
+        for (const raw of rawCandidates) {
+            if (!raw) continue;
+            const normalizedJid = this.normalizeRecipientJid(raw);
+            candidates.add(this.getConversationSenderId(normalizedJid));
+        }
+
+        return [...candidates];
+    }
+
     private normalizeRecipientJid(jid: string): string {
-        if (jid.includes('@')) return jid;
+        if (jid.includes('@')) {
+            const [localPart, domain = ''] = jid.split('@');
+            const normalizedLocal = localPart.split(':')[0].replace(/^\+/, '');
+            return domain ? `${normalizedLocal}@${domain}` : normalizedLocal;
+        }
         const digits = jid.startsWith('+') ? jid.slice(1) : jid;
         return `${digits}@s.whatsapp.net`;
+    }
+
+    private isDirectPhoneJid(jid: string): boolean {
+        return jid.endsWith('@s.whatsapp.net');
+    }
+
+    private isLidJid(jid: string): boolean {
+        return jid.endsWith('@lid');
+    }
+
+    private async getMappedLidForPhoneJid(phoneJid: string): Promise<string | undefined> {
+        const lid = await this.socket?.signalRepository?.lidMapping?.getLIDForPN(phoneJid);
+        return lid && this.isLidJid(lid) ? this.normalizeRecipientJid(lid) : undefined;
+    }
+
+    private async resolveLidPreferredRecipientJid(recipient: string): Promise<string> {
+        const normalized = this.resolveOutboundRecipientJid(recipient);
+        if (SessionManager.isGroupJid(normalized) || this.isLidJid(normalized)) {
+            return normalized;
+        }
+
+        if (!this.isDirectPhoneJid(normalized)) {
+            return normalized;
+        }
+
+        try {
+            const mappedLid = await this.getMappedLidForPhoneJid(normalized);
+            if (mappedLid) {
+                fileLog(`Resolved outbound ${normalized} to LID ${mappedLid}`);
+                return mappedLid;
+            }
+        } catch (error) {
+            fileLog(`Failed to resolve LID for ${normalized}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+
+        return normalized;
+    }
+
+    public async storeLidPnMapping(lid: string, pn: string): Promise<void> {
+        const lidJid = this.normalizeRecipientJid(lid);
+        const pnJid = this.normalizeRecipientJid(pn);
+        if (!this.isLidJid(lidJid) || !this.isDirectPhoneJid(pnJid)) {
+            return;
+        }
+
+        try {
+            await this.socket?.signalRepository?.lidMapping?.storeLIDPNMappings([{ lid: lidJid, pn: pnJid }]);
+            fileLog(`Stored LID mapping ${pnJid} -> ${lidJid}`);
+        } catch (error) {
+            fileLog(`Failed to store LID mapping ${pnJid} -> ${lidJid}: ${error instanceof Error ? error.message : String(error)}`);
+        }
     }
 
     public resolveOutboundRecipientJid(recipient: string): string {
@@ -304,6 +410,10 @@ export class WhatsAppService {
         this.socket.ev.removeAllListeners('connection.update');
         this.socket.ev.removeAllListeners('creds.update');
         this.socket.ev.removeAllListeners('messages.upsert');
+        this.socket.ev.removeAllListeners('lid-mapping.update');
+        this.socket.ev.removeAllListeners('chats.phoneNumberShare');
+        this.socket.ev.removeAllListeners('messages.update');
+        this.socket.ev.removeAllListeners('message-receipt.update');
 
         try {
             this.socket.end(undefined);
@@ -331,6 +441,65 @@ export class WhatsAppService {
         socket.ev.on('messages.upsert', (payload) => {
             void this.handleIncomingMessages(payload);
         });
+
+        socket.ev.on('lid-mapping.update', (payload: LidMappingPayload) => {
+            void this.handleLidMappingUpdate(payload);
+        });
+
+        socket.ev.on('chats.phoneNumberShare', (payload: PhoneNumberSharePayload) => {
+            void this.handlePhoneNumberShare(payload);
+        });
+
+        socket.ev.on('messages.update', (payload: MessageUpdatePayload[]) => {
+            this.logMessageUpdates(payload);
+        });
+
+        socket.ev.on('message-receipt.update', (payload: MessageReceiptPayload[]) => {
+            this.logMessageReceipts(payload);
+        });
+    }
+
+    private async handleLidMappingUpdate(payload: LidMappingPayload) {
+        const lid = payload?.lid ? this.normalizeRecipientJid(payload.lid) : undefined;
+        const pn = payload?.pn ? this.normalizeRecipientJid(payload.pn) : undefined;
+        if (!lid || !pn || !this.isLidJid(lid) || !this.isDirectPhoneJid(pn)) {
+            return;
+        }
+
+        fileLog(`LID mapping update ${pn} -> ${lid}`);
+        await this.onLidMapping?.({ lid, pn });
+    }
+
+    private async handlePhoneNumberShare(payload: PhoneNumberSharePayload) {
+        const lid = payload?.lid ? this.normalizeRecipientJid(payload.lid) : undefined;
+        const pn = payload?.jid ? this.normalizeRecipientJid(payload.jid) : undefined;
+        if (!lid || !pn || !this.isLidJid(lid) || !this.isDirectPhoneJid(pn)) {
+            return;
+        }
+
+        await this.storeLidPnMapping(lid, pn);
+        await this.onLidMapping?.({ lid, pn });
+    }
+
+    private logMessageUpdates(payload: MessageUpdatePayload[] | undefined) {
+        for (const item of payload ?? []) {
+            const jid = item.key?.remoteJid;
+            const id = item.key?.id;
+            const status = item.update?.status;
+            if (jid || id || status !== undefined) {
+                fileLog(`Message update jid=${jid ?? 'unknown'} id=${id ?? 'unknown'} status=${String(status)}`);
+            }
+        }
+    }
+
+    private logMessageReceipts(payload: MessageReceiptPayload[] | undefined) {
+        for (const item of payload ?? []) {
+            const jid = item.key?.remoteJid;
+            const id = item.key?.id;
+            if (jid || id) {
+                fileLog(`Message receipt jid=${jid ?? 'unknown'} id=${id ?? 'unknown'}`);
+            }
+        }
     }
 
     private async createSocket(): Promise<WhatsAppSocketLike> {
@@ -599,7 +768,10 @@ export class WhatsAppService {
             void this.prepareGroupSession(remoteJid);
         }
 
-        const senderJid = this.getConversationSenderId(remoteJid);
+        const senderCandidates = isGroup
+            ? [this.getConversationSenderId(remoteJid)]
+            : this.getDirectSenderCandidates(message, remoteJid);
+        const senderJid = senderCandidates[0] ?? this.getConversationSenderId(remoteJid);
 
         const pushName = message.pushName || undefined;
 
@@ -618,7 +790,7 @@ export class WhatsAppService {
             return;
         }
 
-        if (!this.sessionManager.isConversationAllowed(senderJid)) {
+        if (!senderCandidates.some(candidate => this.sessionManager.isConversationAllowed(candidate))) {
             if (this.isVerbose()) {
                 console.log(t('service.whatsapp.ignoredNotAllowed', { senderJid }));
             }
@@ -644,6 +816,10 @@ export class WhatsAppService {
 
     setStatusCallback(callback: (status: string) => void) {
         this.onStatusUpdate = callback;
+    }
+
+    setLidMappingCallback(callback: (mapping: { lid: string; pn: string }) => void | Promise<void>) {
+        this.onLidMapping = callback;
     }
 
     public getLastRemoteJid(): string | null {
@@ -682,7 +858,7 @@ export class WhatsAppService {
     }
 
     async sendMessage(jid: string, text: string) {
-        const recipientJid = this.resolveOutboundRecipientJid(jid);
+        const recipientJid = await this.resolveLidPreferredRecipientJid(jid);
 
         // Ensure we show the typing indicator before sending
         await this.sendPresence(recipientJid, 'composing');
@@ -703,7 +879,7 @@ export class WhatsAppService {
     }
 
     async sendMenuMessage(jid: string, text: string) {
-        const normalizedJid = this.resolveOutboundRecipientJid(jid);
+        const normalizedJid = await this.resolveLidPreferredRecipientJid(jid);
         const socket = this.getActiveSocket();
 
         if (!socket) {
@@ -722,7 +898,8 @@ export class WhatsAppService {
             return {
                 success: true,
                 messageId: response?.key?.id,
-                attempts: 1
+                attempts: 1,
+                recipientJid: normalizedJid
             };
         } catch (error: unknown) {
             await this.sendPresence(normalizedJid, 'paused');
@@ -730,7 +907,8 @@ export class WhatsAppService {
             return {
                 success: false,
                 error: error instanceof Error ? error.message : 'Unknown error',
-                attempts: 1
+                attempts: 1,
+                recipientJid: normalizedJid
             };
         }
     }

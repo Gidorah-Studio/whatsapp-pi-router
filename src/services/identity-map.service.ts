@@ -7,11 +7,14 @@ export type IdentityMapSource = 'auto' | 'manual';
 export interface IdentityMapEntry {
     conversationId: string;
     whatsappJid?: string;
-    pushName?: string;
+    lidJid?: string;
     phone?: string;
     phoneJid?: string;
+    alternateJid?: string;
+    pushName?: string;
     email?: string;
     externalRecordId?: string;
+    addressingMode?: string;
     source: IdentityMapSource;
     updatedAt: number;
 }
@@ -26,6 +29,10 @@ export interface IncomingIdentityInput {
     conversationId: string;
     whatsappJid: string;
     pushName?: string;
+    lidJid?: string;
+    phoneJid?: string;
+    alternateJid?: string;
+    addressingMode?: string;
 }
 
 const STORE_VERSION = 1;
@@ -41,16 +48,43 @@ export function normalizeIdentityEmail(value: string | undefined): string | unde
     return normalized || undefined;
 }
 
+export function normalizeDirectJid(value: string | undefined): string | undefined {
+    const trimmed = value?.trim();
+    if (!trimmed) return undefined;
+
+    if (!trimmed.includes('@')) {
+        const digits = normalizePhoneDigits(trimmed);
+        return digits ? `${digits}@s.whatsapp.net` : trimmed;
+    }
+
+    const [localPart, domain = ''] = trimmed.split('@');
+    const normalizedLocal = localPart.split(':')[0].replace(/^\+/, '');
+    return domain ? `${normalizedLocal}@${domain}` : normalizedLocal;
+}
+
+export function isLidJid(jid: string | undefined): boolean {
+    return Boolean(jid?.endsWith('@lid'));
+}
+
+export function isPhoneJid(jid: string | undefined): boolean {
+    return Boolean(jid?.endsWith('@s.whatsapp.net'));
+}
+
 function phoneJidFromDigits(digits: string | undefined): string | undefined {
     return digits ? `${digits}@s.whatsapp.net` : undefined;
 }
 
-function isPhoneConversationId(conversationId: string): boolean {
-    return /^\+\d+$/.test(conversationId);
+function phoneConversationIdFromDigits(digits: string | undefined): string | undefined {
+    return digits ? `+${digits}` : undefined;
 }
 
-function isPhoneJid(jid: string): boolean {
-    return jid.endsWith('@s.whatsapp.net');
+function phoneDigitsFromJid(jid: string | undefined): string | undefined {
+    if (!isPhoneJid(jid)) return undefined;
+    return normalizePhoneDigits(jid?.split('@')[0]);
+}
+
+function isPhoneConversationId(conversationId: string): boolean {
+    return /^\+\d+$/.test(conversationId);
 }
 
 function hasLinkedIdentity(entry: IdentityMapEntry): boolean {
@@ -75,6 +109,21 @@ export class IdentityMapService {
         return this.entries.get(conversationId);
     }
 
+    findByJid(jid: string): IdentityMapEntry | undefined {
+        const normalized = normalizeDirectJid(jid) ?? jid;
+        const phone = phoneDigitsFromJid(normalized);
+        const phoneConversationId = phoneConversationIdFromDigits(phone);
+
+        return this.entries.get(normalized)
+            ?? (phoneConversationId ? this.entries.get(phoneConversationId) : undefined)
+            ?? [...this.entries.values()].find(entry =>
+                entry.whatsappJid === normalized
+                || entry.lidJid === normalized
+                || entry.phoneJid === normalized
+                || entry.alternateJid === normalized
+                || (phone && entry.phone === phone));
+    }
+
     getLinkedIdentity(conversationId: string): { kind: 'externalRecordId' | 'email' | 'phone'; value: string } | undefined {
         const entry = this.get(conversationId);
         if (!entry) return undefined;
@@ -91,42 +140,100 @@ export class IdentityMapService {
 
     async recordIncomingIdentity(input: IncomingIdentityInput) {
         await this.ensureInitialized();
-        const now = Date.now();
+
+        const whatsappJid = normalizeDirectJid(input.whatsappJid) ?? input.whatsappJid;
+        const alternateJid = normalizeDirectJid(input.alternateJid);
+        const lidJid = normalizeDirectJid(input.lidJid)
+            ?? (isLidJid(whatsappJid) ? whatsappJid : undefined)
+            ?? (isLidJid(alternateJid) ? alternateJid : undefined);
+        const phoneJid = normalizeDirectJid(input.phoneJid)
+            ?? (isPhoneJid(whatsappJid) ? whatsappJid : undefined)
+            ?? (isPhoneJid(alternateJid) ? alternateJid : undefined);
+        const phone = phoneDigitsFromJid(phoneJid) ?? this.derivePhone(input.conversationId, whatsappJid);
+
         const existing = this.entries.get(input.conversationId);
-        const phone = this.derivePhone(input.conversationId, input.whatsappJid);
-        const next: IdentityMapEntry = {
-            conversationId: input.conversationId,
-            whatsappJid: input.whatsappJid,
-            pushName: input.pushName || existing?.pushName,
-            phone: existing?.phone ?? phone,
-            phoneJid: existing?.phoneJid ?? phoneJidFromDigits(phone),
-            email: existing?.email,
-            externalRecordId: existing?.externalRecordId,
-            source: existing?.source ?? 'auto',
-            updatedAt: existing ? existing.updatedAt : now
-        };
+        const next = this.mergeEntry(input.conversationId, existing, {
+            whatsappJid,
+            alternateJid,
+            lidJid,
+            phone,
+            phoneJid: phoneJid ?? phoneJidFromDigits(phone),
+            pushName: input.pushName,
+            addressingMode: input.addressingMode,
+            source: existing?.source ?? 'auto'
+        });
 
         if (this.entriesEqual(existing, next)) {
             return;
         }
 
-        next.updatedAt = now;
         this.entries.set(input.conversationId, next);
         await this.persistQueued();
     }
 
-    async setManualMapping(conversationId: string, patch: Pick<Partial<IdentityMapEntry>, 'phone' | 'email' | 'externalRecordId' | 'pushName' | 'whatsappJid'>) {
+    async recordLidPnMapping(lid: string, pn: string, source: IdentityMapSource = 'auto') {
+        await this.ensureInitialized();
+        const lidJid = normalizeDirectJid(lid);
+        const phoneJid = normalizeDirectJid(pn);
+        if (!isLidJid(lidJid) || !isPhoneJid(phoneJid)) {
+            return;
+        }
+
+        const phone = phoneDigitsFromJid(phoneJid);
+        const phoneConversationId = phoneConversationIdFromDigits(phone);
+        const now = Date.now();
+        const lidExisting = this.entries.get(lidJid!);
+        const phoneExisting = phoneConversationId ? this.entries.get(phoneConversationId) : undefined;
+        const lidNext = this.mergeEntry(lidJid!, lidExisting, {
+            whatsappJid: lidExisting?.whatsappJid ?? lidJid,
+            lidJid,
+            phone,
+            phoneJid,
+            alternateJid: lidExisting?.alternateJid ?? phoneJid,
+            email: lidExisting?.email ?? phoneExisting?.email,
+            externalRecordId: lidExisting?.externalRecordId ?? phoneExisting?.externalRecordId,
+            pushName: lidExisting?.pushName ?? phoneExisting?.pushName,
+            source: lidExisting?.source ?? phoneExisting?.source ?? source,
+            updatedAt: now
+        });
+        this.entries.set(lidJid!, lidNext);
+
+        if (phoneConversationId) {
+            const phoneNext = this.mergeEntry(phoneConversationId, phoneExisting, {
+                whatsappJid: phoneExisting?.whatsappJid ?? phoneJid,
+                lidJid,
+                phone,
+                phoneJid,
+                alternateJid: phoneExisting?.alternateJid ?? lidJid,
+                email: phoneExisting?.email ?? lidExisting?.email,
+                externalRecordId: phoneExisting?.externalRecordId ?? lidExisting?.externalRecordId,
+                pushName: phoneExisting?.pushName ?? lidExisting?.pushName,
+                source: phoneExisting?.source ?? lidExisting?.source ?? source,
+                updatedAt: now
+            });
+            this.entries.set(phoneConversationId, phoneNext);
+        }
+
+        await this.persistQueued();
+    }
+
+    async setManualMapping(conversationId: string, patch: Pick<Partial<IdentityMapEntry>, 'phone' | 'email' | 'externalRecordId' | 'pushName' | 'whatsappJid' | 'lidJid' | 'phoneJid'>) {
         await this.ensureInitialized();
         const existing = this.entries.get(conversationId);
         const phone = patch.phone ? normalizePhoneDigits(patch.phone) : existing?.phone;
+        const phoneJid = normalizeDirectJid(patch.phoneJid) ?? (phone ? phoneJidFromDigits(phone) : existing?.phoneJid);
+        const lidJid = normalizeDirectJid(patch.lidJid) ?? existing?.lidJid;
         const next: IdentityMapEntry = {
             conversationId,
-            whatsappJid: patch.whatsappJid ?? existing?.whatsappJid,
+            whatsappJid: normalizeDirectJid(patch.whatsappJid) ?? patch.whatsappJid ?? existing?.whatsappJid,
+            lidJid,
             pushName: patch.pushName ?? existing?.pushName,
             phone,
-            phoneJid: phone ? phoneJidFromDigits(phone) : existing?.phoneJid,
+            phoneJid,
+            alternateJid: existing?.alternateJid,
             email: patch.email ? normalizeIdentityEmail(patch.email) : existing?.email,
             externalRecordId: patch.externalRecordId?.trim() || existing?.externalRecordId,
+            addressingMode: existing?.addressingMode,
             source: 'manual',
             updatedAt: Date.now()
         };
@@ -142,7 +249,11 @@ export class IdentityMapService {
         const next: IdentityMapEntry = {
             conversationId,
             whatsappJid: existing.whatsappJid,
+            lidJid: existing.lidJid,
+            phoneJid: existing.phoneJid,
+            alternateJid: existing.alternateJid,
             pushName: existing.pushName,
+            addressingMode: existing.addressingMode,
             source: existing.source,
             updatedAt: Date.now()
         };
@@ -150,12 +261,29 @@ export class IdentityMapService {
         await this.persistQueued();
     }
 
+    private mergeEntry(conversationId: string, existing: IdentityMapEntry | undefined, patch: Partial<IdentityMapEntry>): IdentityMapEntry {
+        return {
+            conversationId,
+            whatsappJid: patch.whatsappJid ?? existing?.whatsappJid,
+            lidJid: patch.lidJid ?? existing?.lidJid,
+            pushName: patch.pushName ?? existing?.pushName,
+            phone: patch.phone ?? existing?.phone,
+            phoneJid: patch.phoneJid ?? existing?.phoneJid,
+            alternateJid: patch.alternateJid ?? existing?.alternateJid,
+            email: patch.email ?? existing?.email,
+            externalRecordId: patch.externalRecordId ?? existing?.externalRecordId,
+            addressingMode: patch.addressingMode ?? existing?.addressingMode,
+            source: patch.source ?? existing?.source ?? 'auto',
+            updatedAt: patch.updatedAt ?? Date.now()
+        };
+    }
+
     private derivePhone(conversationId: string, whatsappJid: string): string | undefined {
         if (isPhoneConversationId(conversationId)) {
             return normalizePhoneDigits(conversationId);
         }
         if (isPhoneJid(whatsappJid)) {
-            return normalizePhoneDigits(whatsappJid.split('@')[0]);
+            return phoneDigitsFromJid(whatsappJid);
         }
         return undefined;
     }
@@ -179,14 +307,20 @@ export class IdentityMapService {
     private cleanEntry(conversationId: string, value: unknown): IdentityMapEntry | undefined {
         if (!value || typeof value !== 'object') return undefined;
         const candidate = value as Partial<IdentityMapEntry>;
+        const phone = typeof candidate.phone === 'string' ? normalizePhoneDigits(candidate.phone) : undefined;
+        const phoneJid = normalizeDirectJid(candidate.phoneJid) ?? phoneJidFromDigits(phone);
+        const lidJid = normalizeDirectJid(candidate.lidJid);
         return {
             conversationId,
-            whatsappJid: typeof candidate.whatsappJid === 'string' ? candidate.whatsappJid : undefined,
+            whatsappJid: typeof candidate.whatsappJid === 'string' ? normalizeDirectJid(candidate.whatsappJid) ?? candidate.whatsappJid : undefined,
+            lidJid: isLidJid(lidJid) ? lidJid : undefined,
             pushName: typeof candidate.pushName === 'string' ? candidate.pushName : undefined,
-            phone: typeof candidate.phone === 'string' ? normalizePhoneDigits(candidate.phone) : undefined,
-            phoneJid: typeof candidate.phoneJid === 'string' ? candidate.phoneJid : undefined,
+            phone,
+            phoneJid: isPhoneJid(phoneJid) ? phoneJid : undefined,
+            alternateJid: typeof candidate.alternateJid === 'string' ? normalizeDirectJid(candidate.alternateJid) ?? candidate.alternateJid : undefined,
             email: typeof candidate.email === 'string' ? normalizeIdentityEmail(candidate.email) : undefined,
             externalRecordId: typeof candidate.externalRecordId === 'string' ? candidate.externalRecordId : undefined,
+            addressingMode: typeof candidate.addressingMode === 'string' ? candidate.addressingMode : undefined,
             source: candidate.source === 'manual' ? 'manual' : 'auto',
             updatedAt: typeof candidate.updatedAt === 'number' ? candidate.updatedAt : Date.now()
         };
@@ -196,11 +330,14 @@ export class IdentityMapService {
         return Boolean(left)
             && left?.conversationId === right.conversationId
             && left?.whatsappJid === right.whatsappJid
+            && left?.lidJid === right.lidJid
             && left?.pushName === right.pushName
             && left?.phone === right.phone
             && left?.phoneJid === right.phoneJid
+            && left?.alternateJid === right.alternateJid
             && left?.email === right.email
             && left?.externalRecordId === right.externalRecordId
+            && left?.addressingMode === right.addressingMode
             && left?.source === right.source;
     }
 
