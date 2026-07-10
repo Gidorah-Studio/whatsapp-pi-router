@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -19,18 +18,13 @@ import { loadRouterAllowConfig } from './services/router-allow.config.js';
 import { IdentityMapService, isLidJid, isPhoneJid, normalizeDirectJid, type IdentityMapEntry } from './services/identity-map.service.js';
 import { OutboundQueueService } from './services/outbound-queue.service.js';
 import { loadResolvedChildPiConfig, type ResolvedChildPiConfig } from './services/child-pi.config.js';
+import { resolveRoutedSessionLaunch, type RoutedSessionLaunch } from './services/routed-session.service.js';
 
 const shutdownState = globalThis as typeof globalThis & {
     __whatsappPiShutdown?: {
         installed: boolean;
         stop?: () => Promise<void>;
     };
-};
-
-const routeSessionId = (remoteJid: string): string => {
-    const kind = remoteJid.endsWith('@g.us') ? 'group' : 'direct';
-    const hash = createHash('sha256').update(remoteJid).digest('hex').slice(0, 16);
-    return `whatsapp-${kind}-${hash}`;
 };
 
 const toConversationId = (remoteJid: string): string => {
@@ -107,7 +101,7 @@ const buildPrompt = (params: {
 ].join('\n');
 
 const runPiForConversation = async (params: {
-    sessionId: string;
+    sessionLaunch: RoutedSessionLaunch;
     prompt: string;
     cwd: string;
     imageBuffer?: Buffer;
@@ -115,7 +109,7 @@ const runPiForConversation = async (params: {
     childPiConfig: ResolvedChildPiConfig;
 }): Promise<string> => {
     const piBin = process.env.WHATSAPP_PI_ROUTER_PI_BIN || 'pi';
-    const args = ['--session-id', params.sessionId];
+    const args = [...params.sessionLaunch.args];
 
     if (params.childPiConfig.model) {
         args.push('--model', params.childPiConfig.model);
@@ -129,7 +123,7 @@ const runPiForConversation = async (params: {
         const ext = params.imageMimeType.includes('png') ? 'png' : params.imageMimeType.includes('webp') ? 'webp' : 'jpg';
         const dir = join(tmpdir(), 'whatsapp-pi-router');
         await mkdir(dir, { recursive: true });
-        const imagePath = join(dir, `${params.sessionId}-${Date.now()}.${ext}`);
+        const imagePath = join(dir, `${params.sessionLaunch.route.key}-${Date.now()}.${ext}`);
         await writeFile(imagePath, params.imageBuffer);
         args.push(`@${imagePath}`);
     }
@@ -386,6 +380,25 @@ export default function (pi: ExtensionAPI) {
 
     const toRecentSenderNumber = (recipientJid: string): string => toConversationId(recipientJid);
 
+    const conversationTurnQueues = new Map<string, Promise<unknown>>();
+    const enqueueConversationTurn = async <T>(conversationKey: string, task: () => Promise<T>): Promise<T> => {
+        const previous = conversationTurnQueues.get(conversationKey) ?? Promise.resolve();
+        const current = previous
+            .catch((error) => {
+                logger.error(`[WhatsApp-Pi-Router] Previous queued turn failed for ${conversationKey}:`, error);
+            })
+            .then(task);
+        conversationTurnQueues.set(conversationKey, current);
+
+        try {
+            return await current;
+        } finally {
+            if (conversationTurnQueues.get(conversationKey) === current) {
+                conversationTurnQueues.delete(conversationKey);
+            }
+        }
+    };
+
     // Handle incoming messages by injecting them as user prompts
     whatsappService.setMessageCallback(async (m) => {
         const msg = m.messages?.[0];
@@ -467,7 +480,6 @@ export default function (pi: ExtensionAPI) {
             });
         }
         const identity = isGroup ? undefined : identityMapService.get(conversationId);
-        const sessionId = routeSessionId(replyJid);
         const prompt = buildPrompt({
             messageHeader,
             text,
@@ -482,14 +494,20 @@ export default function (pi: ExtensionAPI) {
         });
 
         try {
-            const childPiConfig = await loadResolvedChildPiConfig();
-            logger.log(`[WhatsApp-Pi-Router] Dispatching ${remoteJid} via reply ${replyJid} to Pi session ${sessionId} with model ${childPiConfig.model ?? 'Pi default'} and thinking ${childPiConfig.thinking ?? 'Pi default'}`);
-            const reply = await runPiForConversation({
-                sessionId,
-                prompt,
-                cwd: _ctx?.cwd ?? process.cwd(),
-                childPiConfig,
-                ...(imageBuffer && imageMimeType ? { imageBuffer, imageMimeType } : {}),
+            const cwd = _ctx?.cwd ?? process.cwd();
+            const reply = await enqueueConversationTurn(replyJid, async () => {
+                const [childPiConfig, sessionLaunch] = await Promise.all([
+                    loadResolvedChildPiConfig(),
+                    resolveRoutedSessionLaunch(replyJid, cwd)
+                ]);
+                logger.log(`[WhatsApp-Pi-Router] Dispatching ${remoteJid} via reply ${replyJid} to ${sessionLaunch.route.directory} (${sessionLaunch.mode}) with model ${childPiConfig.model ?? 'Pi default'} and thinking ${childPiConfig.thinking ?? 'Pi default'}`);
+                return runPiForConversation({
+                    sessionLaunch,
+                    prompt,
+                    cwd,
+                    childPiConfig,
+                    ...(imageBuffer && imageMimeType ? { imageBuffer, imageMimeType } : {}),
+                });
             });
             if (reply.trim()) {
                 await whatsappService.sendMessage(replyJid, reply.trim());

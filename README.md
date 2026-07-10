@@ -6,20 +6,20 @@ This package is based on the `whatsapp-pi` WhatsApp integration, but inbound Wha
 
 ## Routing model
 
-Each WhatsApp thread gets a deterministic Pi session id:
+Each WhatsApp thread gets a deterministic private session directory:
 
-- direct chats → `whatsapp-direct-<sha256-jid-prefix>`
-- group chats → `whatsapp-group-<sha256-jid-prefix>`
+- direct chats → `~/.pi/agent/extensions/whatsapp-pi/child-sessions/direct-<sha256-jid-prefix>/`
+- group chats → `~/.pi/agent/extensions/whatsapp-pi/child-sessions/group-<sha256-jid-prefix>/`
 
-On each inbound message, the extension runs a headless Pi turn for that session:
+On each inbound message, the extension runs a headless Pi turn that continues the latest session in that conversation directory:
 
 ```bash
-pi --session-id <conversation-session> [--model <provider/model>] [--thinking <level>] --no-extensions --print "<message>"
+pi --session-dir <conversation-directory> --continue [--model <provider/model>] [--thinking <level>] --no-extensions --print "<message>"
 ```
 
-The model and thinking arguments are included when configured. The final stdout is sent back to the originating WhatsApp chat.
+Pi generates the session's standard UUIDv7 identifier. The directory keeps contacts and groups isolated without exposing custom router IDs to model providers. The model and thinking arguments are included when configured, and the final stdout is sent back to the originating WhatsApp chat.
 
-This gives clean segregation between WhatsApp conversations while avoiding recursive loading of the WhatsApp extension inside child Pi turns.
+When a conversation first runs after upgrading from the legacy `whatsapp-direct-*` / `whatsapp-group-*` session-ID scheme, the router automatically forks the legacy session into its new directory before processing the message. The original legacy session file remains untouched as a backup.
 
 ## Install from GitHub
 
@@ -161,5 +161,6 @@ npx tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 -
 ## Notes
 
 - Child Pi turns use `--no-extensions` to avoid recursively starting another WhatsApp router.
-- Session history is still persistent because `--session-id` is stable per WhatsApp JID.
+- Session history remains persistent because each WhatsApp JID maps to one stable private session directory.
+- Turns for the same conversation are serialized so simultaneous messages cannot create or update competing sessions.
 - Streaming is intentionally not implemented; WhatsApp receives the final answer once the child Pi turn completes.
