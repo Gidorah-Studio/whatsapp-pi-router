@@ -9,6 +9,13 @@ import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { t } from '../i18n.js';
 import { updateRouterAllowFileConfig } from '../services/router-allow.config.js';
 import { IdentityMapService, normalizeIdentityEmail, normalizePhoneDigits } from '../services/identity-map.service.js';
+import {
+    CHILD_PI_THINKING_LEVELS,
+    loadChildPiFileConfig,
+    loadResolvedChildPiConfig,
+    saveChildPiFileConfig,
+    type ChildPiFileConfig
+} from '../services/child-pi.config.js';
 
 interface HistoryOptionEntry {
     label: string;
@@ -44,6 +51,7 @@ export class MenuHandler {
         const allowAllDirectChatsLabel = t(this.sessionManager.getAllowAllDirectChats()
             ? 'menu.root.allowAllDirectChatsOn'
             : 'menu.root.allowAllDirectChatsOff');
+        const childPiSettingsLabel = t('menu.root.childPiSettings');
         const logoffDeleteSessionLabel = t('menu.root.logoffDeleteSession');
         const backLabel = t('menu.root.back');
         const options: string[] = [];
@@ -58,6 +66,8 @@ export class MenuHandler {
             options.push(connectWhatsAppLabel);
             options.push(allowAllDirectChatsLabel);
         }
+
+        options.push(childPiSettingsLabel);
 
         if (registered) {
             options.push(logoffDeleteSessionLabel);
@@ -104,6 +114,9 @@ export class MenuHandler {
             case allowAllDirectChatsLabel:
                 await this.toggleAllowAllDirectChats(ctx);
                 break;
+            case childPiSettingsLabel:
+                await this.manageChildPiSettings(ctx);
+                break;
             case recentsLabel:
                 await this.manageRecents(ctx);
                 break;
@@ -137,6 +150,128 @@ export class MenuHandler {
         }
 
         await this.handleCommand(ctx);
+    }
+
+    private async manageChildPiSettings(ctx: ExtensionCommandContext) {
+        let saved: ChildPiFileConfig;
+        let effective: Awaited<ReturnType<typeof loadResolvedChildPiConfig>>;
+        try {
+            saved = await loadChildPiFileConfig();
+            effective = await loadResolvedChildPiConfig();
+        } catch (error) {
+            ctx.ui.notify(t('menu.childPi.loadFailure', {
+                error: error instanceof Error ? error.message : String(error)
+            }), 'error');
+            await this.handleCommand(ctx);
+            return;
+        }
+
+        const formatEffectiveValue = (
+            value: string | undefined,
+            source: 'environment' | 'file' | 'default'
+        ): string => {
+            if (source === 'environment') return `${value} [environment override]`;
+            if (source === 'file') return `${value} [saved]`;
+            return t('menu.childPi.piDefault');
+        };
+
+        const modelLabel = t('menu.childPi.model', {
+            value: formatEffectiveValue(effective.model, effective.modelSource)
+        });
+        const thinkingLabel = t('menu.childPi.thinking', {
+            value: formatEffectiveValue(effective.thinking, effective.thinkingSource)
+        });
+        const resetLabel = t('menu.childPi.reset');
+        const backLabel = t('menu.root.back');
+        const choice = await ctx.ui.select(t('menu.childPi.title'), [
+            modelLabel,
+            thinkingLabel,
+            resetLabel,
+            backLabel
+        ]);
+
+        if (!choice || choice === backLabel) {
+            await this.handleCommand(ctx);
+            return;
+        }
+
+        if (choice === modelLabel) {
+            const input = await ctx.ui.input(
+                t('menu.childPi.modelPrompt'),
+                saved.model ?? effective.model ?? 'openai-codex/gpt-5.6-luna'
+            );
+            if (input !== undefined) {
+                const model = input.trim();
+                if (!model) {
+                    ctx.ui.notify(t('menu.childPi.modelRequired'), 'error');
+                } else {
+                    try {
+                        await saveChildPiFileConfig({
+                            ...saved,
+                            model: model.toLowerCase() === 'default' ? undefined : model
+                        });
+                        await this.notifyChildPiSettingsSaved(ctx);
+                    } catch (error) {
+                        ctx.ui.notify(t('menu.childPi.saveFailure', {
+                            error: error instanceof Error ? error.message : String(error)
+                        }), 'error');
+                    }
+                }
+            }
+            await this.manageChildPiSettings(ctx);
+            return;
+        }
+
+        if (choice === thinkingLabel) {
+            const piDefaultLabel = t('menu.childPi.usePiDefault');
+            const thinkingChoice = await ctx.ui.select(t('menu.childPi.thinkingPrompt'), [
+                piDefaultLabel,
+                ...CHILD_PI_THINKING_LEVELS
+            ]);
+            if (thinkingChoice) {
+                try {
+                    await saveChildPiFileConfig({
+                        ...saved,
+                        thinking: thinkingChoice === piDefaultLabel
+                            ? undefined
+                            : thinkingChoice as typeof CHILD_PI_THINKING_LEVELS[number]
+                    });
+                    await this.notifyChildPiSettingsSaved(ctx);
+                } catch (error) {
+                    ctx.ui.notify(t('menu.childPi.saveFailure', {
+                        error: error instanceof Error ? error.message : String(error)
+                    }), 'error');
+                }
+            }
+            await this.manageChildPiSettings(ctx);
+            return;
+        }
+
+        if (choice === resetLabel) {
+            const confirmed = await ctx.ui.confirm(
+                t('menu.childPi.resetTitle'),
+                t('menu.childPi.resetConfirm')
+            );
+            if (confirmed) {
+                try {
+                    await saveChildPiFileConfig({});
+                    await this.notifyChildPiSettingsSaved(ctx);
+                } catch (error) {
+                    ctx.ui.notify(t('menu.childPi.saveFailure', {
+                        error: error instanceof Error ? error.message : String(error)
+                    }), 'error');
+                }
+            }
+            await this.manageChildPiSettings(ctx);
+        }
+    }
+
+    private async notifyChildPiSettingsSaved(ctx: ExtensionCommandContext) {
+        const effective = await loadResolvedChildPiConfig();
+        ctx.ui.notify(t('menu.childPi.saved', {
+            model: effective.model ?? t('menu.childPi.piDefault'),
+            thinking: effective.thinking ?? t('menu.childPi.piDefault')
+        }), 'info');
     }
 
     private async manageAllowList(ctx: ExtensionCommandContext) {

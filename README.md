@@ -14,10 +14,10 @@ Each WhatsApp thread gets a deterministic Pi session id:
 On each inbound message, the extension runs a headless Pi turn for that session:
 
 ```bash
-pi --session-id <conversation-session> --no-extensions --print "<message>"
+pi --session-id <conversation-session> [--model <provider/model>] [--thinking <level>] --no-extensions --print "<message>"
 ```
 
-The final stdout is sent back to the originating WhatsApp chat.
+The model and thinking arguments are included when configured. The final stdout is sent back to the originating WhatsApp chat.
 
 This gives clean segregation between WhatsApp conversations while avoiding recursive loading of the WhatsApp extension inside child Pi turns.
 
@@ -116,10 +116,25 @@ Example job:
 
 ## Configuration
 
+### Child Pi model and thinking
+
+Open `/whatsapp` → `Child Pi Settings` to set the model and thinking level used by routed child Pi turns. Settings are stored outside the package at `~/.pi/agent/extensions/whatsapp-pi/child-pi.json`, so extension updates do not overwrite them. A saved change applies to the next routed WhatsApp turn, including turns for an existing per-conversation session; it does not change a child turn that is already running.
+
+For deployment-managed configuration, set environment overrides before starting the host Pi process:
+
+```bash
+export WHATSAPP_PI_ROUTER_MODEL="openai-codex/gpt-5.6-luna"
+export WHATSAPP_PI_ROUTER_THINKING="low"
+```
+
+Precedence is environment override → saved `/whatsapp` setting → normal Pi default/session behavior. When an environment override is active, the settings screen marks it as such; UI changes are saved as fallbacks but do not become effective until that environment variable is unset and the host Pi process is restarted. Supported thinking values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+
 Optional environment variables:
 
 - `WHATSAPP_PI_ROUTER_PI_BIN` — Pi executable to spawn. Defaults to `pi`.
 - `WHATSAPP_PI_ROUTER_TIMEOUT_MS` — child Pi turn timeout. Defaults to 10 minutes.
+- `WHATSAPP_PI_ROUTER_MODEL` — model pattern passed to child Pi as `--model`, for example `openai-codex/gpt-5.6-luna`.
+- `WHATSAPP_PI_ROUTER_THINKING` — thinking level passed to child Pi as `--thinking`.
 - `WHATSAPP_ROUTER_ALLOW_NUMBERS` — comma-separated numbers/JIDs to force-add to the allowlist at startup.
 - `WHATSAPP_ROUTER_ALLOW_ALL` or `WHATSAPP_ROUTER_ALLOW_ALL_DIRECT_CHATS` — set to `true`, `1`, `yes`, `on`, `all`, or `*` to route every inbound direct chat without allowlist checks.
 - `WHATSAPP_ROUTER_ALLOW_ALL_GROUPS` — set to a truthy value to route every inbound group without allowlist checks. Groups are explicit-only by default.

@@ -18,6 +18,7 @@ import { initI18n, t } from './i18n.js';
 import { loadRouterAllowConfig } from './services/router-allow.config.js';
 import { IdentityMapService, isLidJid, isPhoneJid, normalizeDirectJid, type IdentityMapEntry } from './services/identity-map.service.js';
 import { OutboundQueueService } from './services/outbound-queue.service.js';
+import { loadResolvedChildPiConfig, type ResolvedChildPiConfig } from './services/child-pi.config.js';
 
 const shutdownState = globalThis as typeof globalThis & {
     __whatsappPiShutdown?: {
@@ -111,9 +112,18 @@ const runPiForConversation = async (params: {
     cwd: string;
     imageBuffer?: Buffer;
     imageMimeType?: string;
+    childPiConfig: ResolvedChildPiConfig;
 }): Promise<string> => {
     const piBin = process.env.WHATSAPP_PI_ROUTER_PI_BIN || 'pi';
-    const args = ['--session-id', params.sessionId, '--no-extensions', '--print'];
+    const args = ['--session-id', params.sessionId];
+
+    if (params.childPiConfig.model) {
+        args.push('--model', params.childPiConfig.model);
+    }
+    if (params.childPiConfig.thinking) {
+        args.push('--thinking', params.childPiConfig.thinking);
+    }
+    args.push('--no-extensions', '--print');
 
     if (params.imageBuffer && params.imageMimeType) {
         const ext = params.imageMimeType.includes('png') ? 'png' : params.imageMimeType.includes('webp') ? 'webp' : 'jpg';
@@ -254,6 +264,15 @@ export default function (pi: ExtensionAPI) {
 
         whatsappService.setVerboseMode(isVerbose);
         logger.setVerbose(isVerbose);
+
+        try {
+            const childPiConfig = await loadResolvedChildPiConfig();
+            logger.log(`[WhatsApp-Pi-Router] Child Pi model: ${childPiConfig.model ?? 'Pi default'} (${childPiConfig.modelSource}); thinking: ${childPiConfig.thinking ?? 'Pi default'} (${childPiConfig.thinkingSource})`);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error('[WhatsApp-Pi-Router] Invalid child Pi settings:', message);
+            ctx.ui.notify(`WhatsApp child Pi settings are invalid: ${message}`, 'error');
+        }
 
         if (isVerbose) {
             logger.log('[WhatsApp-Pi] Verbose mode enabled - Baileys trace logs will be shown');
@@ -463,11 +482,13 @@ export default function (pi: ExtensionAPI) {
         });
 
         try {
-            logger.log(`[WhatsApp-Pi-Router] Dispatching ${remoteJid} via reply ${replyJid} to Pi session ${sessionId}`);
+            const childPiConfig = await loadResolvedChildPiConfig();
+            logger.log(`[WhatsApp-Pi-Router] Dispatching ${remoteJid} via reply ${replyJid} to Pi session ${sessionId} with model ${childPiConfig.model ?? 'Pi default'} and thinking ${childPiConfig.thinking ?? 'Pi default'}`);
             const reply = await runPiForConversation({
                 sessionId,
                 prompt,
                 cwd: _ctx?.cwd ?? process.cwd(),
+                childPiConfig,
                 ...(imageBuffer && imageMimeType ? { imageBuffer, imageMimeType } : {}),
             });
             if (reply.trim()) {
