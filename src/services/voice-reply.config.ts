@@ -13,8 +13,8 @@ export const VOICE_REPLY_MODES = [
 export type VoiceReplyMode = typeof VOICE_REPLY_MODES[number];
 export type VoiceReplyConfigSource = 'environment' | 'file' | 'default';
 
-export const DEFAULT_TTS_MODEL = 'x-ai/grok-voice-tts-1.0';
-export const DEFAULT_TTS_VOICE = 'ara';
+export const DEFAULT_TTS_MODEL = 'google/gemini-3.1-flash-tts-preview';
+export const DEFAULT_TTS_VOICE = 'Sulafat';
 export const DEFAULT_TTS_SPEED = 1;
 
 export interface VoiceReplyFileConfig {

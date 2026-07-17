@@ -11,8 +11,10 @@ import {
     saveVoiceReplyFileConfig
 } from '../src/services/voice-reply.config.js';
 
-test('Ara is the default Grok TTS voice', () => {
-    assert.equal(getDefaultResolvedVoiceReplyConfig().voice, 'ara');
+test('Gemini Flash TTS with Sulafat is the default voice configuration', () => {
+    const defaults = getDefaultResolvedVoiceReplyConfig();
+    assert.equal(defaults.model, 'google/gemini-3.1-flash-tts-preview');
+    assert.equal(defaults.voice, 'Sulafat');
 });
 
 const ENV_NAMES = [
@@ -33,27 +35,27 @@ test('voice settings persist privately and environment values override saved val
 
         await saveVoiceReplyFileConfig({
             mode: 'mirror-explicit',
-            model: 'x-ai/grok-voice-tts-1.0',
-            voice: 'eve',
+            model: 'custom/speech-model',
+            voice: 'custom-voice',
             speed: 1.1
         });
         assert.deepEqual(await loadVoiceReplyFileConfig(), {
             mode: 'mirror-explicit',
-            model: 'x-ai/grok-voice-tts-1.0',
-            voice: 'eve',
+            model: 'custom/speech-model',
+            voice: 'custom-voice',
             speed: 1.1
         });
         assert.equal((await stat(getVoiceReplyConfigPath())).mode & 0o777, 0o600);
         assert.match(await readFile(getVoiceReplyConfigPath(), 'utf8'), /mirror-explicit/);
 
         process.env.WHATSAPP_PI_ROUTER_TTS_MODE = 'explicit';
-        process.env.WHATSAPP_PI_ROUTER_TTS_VOICE = 'ara';
+        process.env.WHATSAPP_PI_ROUTER_TTS_VOICE = 'override-voice';
         process.env.WHATSAPP_PI_ROUTER_TTS_SPEED = '1.25';
         const resolved = await loadResolvedVoiceReplyConfig();
         assert.equal(resolved.mode, 'explicit');
         assert.equal(resolved.modeSource, 'environment');
         assert.equal(resolved.modelSource, 'file');
-        assert.equal(resolved.voice, 'ara');
+        assert.equal(resolved.voice, 'override-voice');
         assert.equal(resolved.voiceSource, 'environment');
         assert.equal(resolved.speed, 1.25);
         assert.equal(resolved.speedSource, 'environment');
