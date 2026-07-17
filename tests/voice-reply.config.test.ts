@@ -4,11 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+    getDefaultResolvedVoiceReplyConfig,
     getVoiceReplyConfigPath,
     loadResolvedVoiceReplyConfig,
     loadVoiceReplyFileConfig,
     saveVoiceReplyFileConfig
 } from '../src/services/voice-reply.config.js';
+
+test('Ara is the default Grok TTS voice', () => {
+    assert.equal(getDefaultResolvedVoiceReplyConfig().voice, 'ara');
+});
 
 const ENV_NAMES = [
     'WHATSAPP_PI_ROUTER_TTS_MODE',

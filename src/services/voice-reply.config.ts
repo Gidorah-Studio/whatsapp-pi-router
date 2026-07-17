@@ -14,7 +14,7 @@ export type VoiceReplyMode = typeof VOICE_REPLY_MODES[number];
 export type VoiceReplyConfigSource = 'environment' | 'file' | 'default';
 
 export const DEFAULT_TTS_MODEL = 'x-ai/grok-voice-tts-1.0';
-export const DEFAULT_TTS_VOICE = 'eve';
+export const DEFAULT_TTS_VOICE = 'ara';
 export const DEFAULT_TTS_SPEED = 1;
 
 export interface VoiceReplyFileConfig {

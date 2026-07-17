@@ -83,7 +83,7 @@ Voice replies are off by default to avoid surprise API spend. Available modes ar
 - `mirror-explicit` — mirror incoming voice and also allow explicit voice replies to text input. This is the recommended mode.
 - `always` — synthesize every non-empty routed reply.
 
-The router sends text to OpenRouter's `/api/v1/audio/speech` endpoint, receives MP3, converts it with `ffmpeg` to mono OGG/Opus, and sends it through Baileys as a push-to-talk voice note. The default model is `x-ai/grok-voice-tts-1.0`, with voice `eve` and speed `1`. Models and voice catalogs change over time, so configure a current OpenRouter speech model/voice when overriding the defaults.
+The router sends text to OpenRouter's `/api/v1/audio/speech` endpoint, receives MP3, converts it with `ffmpeg` to mono OGG/Opus, and sends it through Baileys as a push-to-talk voice note. The default model is `x-ai/grok-voice-tts-1.0`, with voice `ara` and speed `1`. Models and voice catalogs change over time, so configure a current OpenRouter speech model/voice when overriding the defaults.
 
 TTS uses the same `OPENROUTER_API_KEY` as OpenRouter STT. If synthesis, conversion, or voice delivery fails, the router logs the error and falls back to the cleaned text reply. Replies over 4096 characters also fall back to text rather than being truncated or incurring an unexpectedly large TTS request. Temporary MP3/OGG files are mode `0600` and removed after delivery.
 
@@ -160,7 +160,7 @@ Optional environment variables:
 - `STT_MODEL` — OpenRouter STT model. Defaults to `openai/whisper-1`.
 - `WHATSAPP_PI_ROUTER_TTS_MODE` — voice reply mode: `off`, `explicit`, `mirror`, `mirror-explicit`, or `always`.
 - `WHATSAPP_PI_ROUTER_TTS_MODEL` — OpenRouter speech model. Defaults to `x-ai/grok-voice-tts-1.0`.
-- `WHATSAPP_PI_ROUTER_TTS_VOICE` — voice supported by the selected speech model. Defaults to `eve`.
+- `WHATSAPP_PI_ROUTER_TTS_VOICE` — voice supported by the selected speech model. Defaults to `ara`.
 - `WHATSAPP_PI_ROUTER_TTS_SPEED` — speech speed from `0.5` to `2`. Defaults to `1`.
 
 TTS environment overrides take precedence over saved `/whatsapp` settings, which take precedence over router defaults. `OPENROUTER_API_KEY` is required whenever the effective TTS mode is not `off`.
