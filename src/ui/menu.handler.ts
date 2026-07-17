@@ -16,6 +16,16 @@ import {
     saveChildPiFileConfig,
     type ChildPiFileConfig
 } from '../services/child-pi.config.js';
+import {
+    DEFAULT_TTS_MODEL,
+    DEFAULT_TTS_SPEED,
+    DEFAULT_TTS_VOICE,
+    loadResolvedVoiceReplyConfig,
+    loadVoiceReplyFileConfig,
+    saveVoiceReplyFileConfig,
+    type VoiceReplyFileConfig,
+    type VoiceReplyMode
+} from '../services/voice-reply.config.js';
 
 interface HistoryOptionEntry {
     label: string;
@@ -52,6 +62,7 @@ export class MenuHandler {
             ? 'menu.root.allowAllDirectChatsOn'
             : 'menu.root.allowAllDirectChatsOff');
         const childPiSettingsLabel = t('menu.root.childPiSettings');
+        const voiceRepliesLabel = t('menu.root.voiceReplies');
         const logoffDeleteSessionLabel = t('menu.root.logoffDeleteSession');
         const backLabel = t('menu.root.back');
         const options: string[] = [];
@@ -68,6 +79,7 @@ export class MenuHandler {
         }
 
         options.push(childPiSettingsLabel);
+        options.push(voiceRepliesLabel);
 
         if (registered) {
             options.push(logoffDeleteSessionLabel);
@@ -116,6 +128,9 @@ export class MenuHandler {
                 break;
             case childPiSettingsLabel:
                 await this.manageChildPiSettings(ctx);
+                break;
+            case voiceRepliesLabel:
+                await this.manageVoiceReplySettings(ctx);
                 break;
             case recentsLabel:
                 await this.manageRecents(ctx);
@@ -272,6 +287,144 @@ export class MenuHandler {
             model: effective.model ?? t('menu.childPi.piDefault'),
             thinking: effective.thinking ?? t('menu.childPi.piDefault')
         }), 'info');
+    }
+
+    private async manageVoiceReplySettings(ctx: ExtensionCommandContext) {
+        let saved: VoiceReplyFileConfig;
+        let effective: Awaited<ReturnType<typeof loadResolvedVoiceReplyConfig>>;
+        try {
+            saved = await loadVoiceReplyFileConfig();
+            effective = await loadResolvedVoiceReplyConfig();
+        } catch (error) {
+            ctx.ui.notify(t('menu.voice.loadFailure', {
+                error: error instanceof Error ? error.message : String(error)
+            }), 'error');
+            await this.handleCommand(ctx);
+            return;
+        }
+
+        const formatValue = (value: string | number, source: 'environment' | 'file' | 'default') => {
+            if (source === 'environment') return `${value} [environment override]`;
+            if (source === 'file') return `${value} [saved]`;
+            return `${value} [default]`;
+        };
+        const modeLabels: Record<VoiceReplyMode, string> = {
+            off: t('menu.voice.mode.off'),
+            explicit: t('menu.voice.mode.explicit'),
+            mirror: t('menu.voice.mode.mirror'),
+            'mirror-explicit': t('menu.voice.mode.mirrorExplicit'),
+            always: t('menu.voice.mode.always')
+        };
+        const modeChoices = Object.entries(modeLabels) as Array<[VoiceReplyMode, string]>;
+        const modeLabel = t('menu.voice.mode', {
+            value: formatValue(modeLabels[effective.mode], effective.modeSource)
+        });
+        const modelLabel = t('menu.voice.model', {
+            value: formatValue(effective.model, effective.modelSource)
+        });
+        const voiceLabel = t('menu.voice.voice', {
+            value: formatValue(effective.voice, effective.voiceSource)
+        });
+        const speedLabel = t('menu.voice.speed', {
+            value: formatValue(effective.speed, effective.speedSource)
+        });
+        const resetLabel = t('menu.voice.reset');
+        const backLabel = t('menu.root.back');
+        const choice = await ctx.ui.select(t('menu.voice.title'), [
+            modeLabel,
+            modelLabel,
+            voiceLabel,
+            speedLabel,
+            resetLabel,
+            backLabel
+        ]);
+
+        if (!choice || choice === backLabel) {
+            await this.handleCommand(ctx);
+            return;
+        }
+
+        if (choice === modeLabel) {
+            const selected = await ctx.ui.select(t('menu.voice.modePrompt'), modeChoices.map(([, label]) => label));
+            const mode = modeChoices.find(([, label]) => label === selected)?.[0];
+            if (mode) {
+                await this.saveVoiceSettings(ctx, { ...saved, mode });
+            }
+            await this.manageVoiceReplySettings(ctx);
+            return;
+        }
+
+        if (choice === modelLabel) {
+            const input = await ctx.ui.input(t('menu.voice.modelPrompt'), saved.model ?? effective.model);
+            if (input !== undefined) {
+                const model = input.trim();
+                if (!model) {
+                    ctx.ui.notify(t('menu.voice.valueRequired'), 'error');
+                } else {
+                    await this.saveVoiceSettings(ctx, {
+                        ...saved,
+                        model: model.toLowerCase() === 'default' ? undefined : model
+                    });
+                }
+            }
+            await this.manageVoiceReplySettings(ctx);
+            return;
+        }
+
+        if (choice === voiceLabel) {
+            const input = await ctx.ui.input(t('menu.voice.voicePrompt'), saved.voice ?? effective.voice);
+            if (input !== undefined) {
+                const voice = input.trim();
+                if (!voice) {
+                    ctx.ui.notify(t('menu.voice.valueRequired'), 'error');
+                } else {
+                    await this.saveVoiceSettings(ctx, {
+                        ...saved,
+                        voice: voice.toLowerCase() === 'default' ? undefined : voice
+                    });
+                }
+            }
+            await this.manageVoiceReplySettings(ctx);
+            return;
+        }
+
+        if (choice === speedLabel) {
+            const input = await ctx.ui.input(t('menu.voice.speedPrompt'), String(saved.speed ?? effective.speed));
+            if (input !== undefined) {
+                const trimmed = input.trim();
+                const speed = trimmed.toLowerCase() === 'default' ? undefined : Number(trimmed);
+                if (speed !== undefined && (!Number.isFinite(speed) || speed < 0.5 || speed > 2)) {
+                    ctx.ui.notify(t('menu.voice.speedInvalid'), 'error');
+                } else {
+                    await this.saveVoiceSettings(ctx, { ...saved, speed });
+                }
+            }
+            await this.manageVoiceReplySettings(ctx);
+            return;
+        }
+
+        if (choice === resetLabel) {
+            const confirmed = await ctx.ui.confirm(t('menu.voice.resetTitle'), t('menu.voice.resetConfirm'));
+            if (confirmed) await this.saveVoiceSettings(ctx, {});
+            await this.manageVoiceReplySettings(ctx);
+        }
+    }
+
+    private async saveVoiceSettings(ctx: ExtensionCommandContext, config: VoiceReplyFileConfig) {
+        try {
+            await saveVoiceReplyFileConfig(config);
+            const effective = await loadResolvedVoiceReplyConfig();
+            ctx.ui.notify(t('menu.voice.saved', {
+                mode: effective.mode,
+                model: effective.model || DEFAULT_TTS_MODEL,
+                voice: effective.voice || DEFAULT_TTS_VOICE,
+                speed: effective.speed ?? DEFAULT_TTS_SPEED
+            }), 'info');
+        } catch (error) {
+            ctx.ui.notify(t('menu.voice.saveFailure', {
+                error: error instanceof Error ? error.message : String(error)
+            }), 'error');
+        }
     }
 
     private async manageAllowList(ctx: ExtensionCommandContext) {

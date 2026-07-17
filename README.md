@@ -71,7 +71,23 @@ export STT_MODEL="openai/whisper-1"
 
 `STT_PROVIDER` may be left unset, or set to `local`, `whisper`, `whisper-cpp`, or `whisper_cpp`, to use local whisper-cpp transcription. When `STT_PROVIDER=openrouter`, the router sends the converted WAV file as base64 JSON to OpenRouter's audio transcription endpoint using `STT_MODEL` or `openai/whisper-1` by default. If OpenRouter fails and local whisper-cpp is available, the router falls back to local transcription.
 
-No text-to-speech voice replies are implemented yet; WhatsApp replies are still sent as text.
+## Text-to-speech voice replies
+
+Routed child Pi sessions can send WhatsApp voice notes through OpenRouter TTS. Open `/whatsapp` → `Voice Reply Settings` to configure the reply mode, speech model, voice, and speed. Settings are stored at `~/.pi/agent/extensions/whatsapp-pi/voice-replies.json` and apply to the next routed turn.
+
+Voice replies are off by default to avoid surprise API spend. Available modes are:
+
+- `off` — always send routed replies as text.
+- `explicit` — send voice only when the child agent adds `<!-- whatsapp_voice -->` on its own line. The router prompts the child agent to use this marker when the user asks for voice, then strips it before delivery.
+- `mirror` — incoming voice/audio receives a voice reply; text input receives text.
+- `mirror-explicit` — mirror incoming voice and also allow explicit voice replies to text input. This is the recommended mode.
+- `always` — synthesize every non-empty routed reply.
+
+The router sends text to OpenRouter's `/api/v1/audio/speech` endpoint, receives MP3, converts it with `ffmpeg` to mono OGG/Opus, and sends it through Baileys as a push-to-talk voice note. The default model is `x-ai/grok-voice-tts-1.0`, with voice `eve` and speed `1`. Models and voice catalogs change over time, so configure a current OpenRouter speech model/voice when overriding the defaults.
+
+TTS uses the same `OPENROUTER_API_KEY` as OpenRouter STT. If synthesis, conversion, or voice delivery fails, the router logs the error and falls back to the cleaned text reply. Replies over 4096 characters also fall back to text rather than being truncated or incurring an unexpectedly large TTS request. Temporary MP3/OGG files are mode `0600` and removed after delivery.
+
+TTS currently applies to automatic replies from routed per-conversation child Pi sessions. Menu sends, the file-backed outbound queue, and legacy main-session forwarding remain text-only.
 
 ## Identity mapping and LID routing
 
@@ -142,6 +158,12 @@ Optional environment variables:
 - `STT_PROVIDER` — speech-to-text provider for inbound WhatsApp voice/audio. Defaults to local whisper-cpp. Set to `openrouter` to use OpenRouter.
 - `OPENROUTER_API_KEY` — required when `STT_PROVIDER=openrouter`.
 - `STT_MODEL` — OpenRouter STT model. Defaults to `openai/whisper-1`.
+- `WHATSAPP_PI_ROUTER_TTS_MODE` — voice reply mode: `off`, `explicit`, `mirror`, `mirror-explicit`, or `always`.
+- `WHATSAPP_PI_ROUTER_TTS_MODEL` — OpenRouter speech model. Defaults to `x-ai/grok-voice-tts-1.0`.
+- `WHATSAPP_PI_ROUTER_TTS_VOICE` — voice supported by the selected speech model. Defaults to `eve`.
+- `WHATSAPP_PI_ROUTER_TTS_SPEED` — speech speed from `0.5` to `2`. Defaults to `1`.
+
+TTS environment overrides take precedence over saved `/whatsapp` settings, which take precedence over router defaults. `OPENROUTER_API_KEY` is required whenever the effective TTS mode is not `off`.
 
 ## Development
 
@@ -152,10 +174,11 @@ npm install
 pi -e ./src/whatsapp-router.ts
 ```
 
-Run a typecheck:
+Run checks:
 
 ```bash
-npx tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --skipLibCheck --allowSyntheticDefaultImports src/whatsapp-router.ts
+npm run typecheck
+npm test
 ```
 
 ## Notes

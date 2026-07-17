@@ -19,6 +19,14 @@ import { IdentityMapService, isLidJid, isPhoneJid, normalizeDirectJid, type Iden
 import { OutboundQueueService } from './services/outbound-queue.service.js';
 import { loadResolvedChildPiConfig, type ResolvedChildPiConfig } from './services/child-pi.config.js';
 import { resolveRoutedSessionLaunch, type RoutedSessionLaunch } from './services/routed-session.service.js';
+import { TextToSpeechService } from './services/text-to-speech.service.js';
+import {
+    getDefaultResolvedVoiceReplyConfig,
+    loadResolvedVoiceReplyConfig,
+    type ResolvedVoiceReplyConfig,
+    type VoiceReplyMode
+} from './services/voice-reply.config.js';
+import { buildVoiceReplyPromptLines, planVoiceReply } from './services/voice-reply.service.js';
 
 const shutdownState = globalThis as typeof globalThis & {
     __whatsappPiShutdown?: {
@@ -83,6 +91,8 @@ const buildPrompt = (params: {
     participant: string;
     conversationId: string;
     identity?: IdentityMapEntry;
+    voiceReplyMode: VoiceReplyMode;
+    incomingWasVoice: boolean;
 }): string => [
     '[WhatsApp routed conversation]',
     `Conversation type: ${params.isGroup ? 'group' : 'direct'}`,
@@ -98,6 +108,7 @@ const buildPrompt = (params: {
     `${params.messageHeader} ${params.text}`,
     '',
     'Reply naturally to the WhatsApp sender. Return only the message text to send back.',
+    ...buildVoiceReplyPromptLines(params.voiceReplyMode, params.incomingWasVoice),
 ].join('\n');
 
 const runPiForConversation = async (params: {
@@ -194,6 +205,7 @@ export default function (pi: ExtensionAPI) {
     const logger = new WhatsAppPiLogger(false);
     const outboundQueueService = new OutboundQueueService(whatsappService, recentsService, logger);
     const audioService = new AudioService(logger);
+    const textToSpeechService = new TextToSpeechService(logger);
     const incomingMediaService = new IncomingMediaService(audioService, logger);
     const menuHandler = new MenuHandler(whatsappService, sessionManager, recentsService, identityMapService);
     let _ctx: ExtensionContext | undefined;
@@ -266,6 +278,18 @@ export default function (pi: ExtensionAPI) {
             const message = error instanceof Error ? error.message : String(error);
             logger.error('[WhatsApp-Pi-Router] Invalid child Pi settings:', message);
             ctx.ui.notify(`WhatsApp child Pi settings are invalid: ${message}`, 'error');
+        }
+
+        try {
+            const voiceConfig = await loadResolvedVoiceReplyConfig();
+            logger.log(`[WhatsApp-Pi-Router] Voice replies: ${voiceConfig.mode} (${voiceConfig.modeSource}); model ${voiceConfig.model}; voice ${voiceConfig.voice}; speed ${voiceConfig.speed}`);
+            if (voiceConfig.mode !== 'off' && !process.env.OPENROUTER_API_KEY?.trim()) {
+                ctx.ui.notify('WhatsApp voice replies are enabled but OPENROUTER_API_KEY is not configured. Replies will fall back to text.', 'warning');
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error('[WhatsApp-Pi-Router] Invalid voice reply settings:', message);
+            ctx.ui.notify(`WhatsApp voice reply settings are invalid: ${message}`, 'error');
         }
 
         if (isVerbose) {
@@ -380,6 +404,61 @@ export default function (pi: ExtensionAPI) {
 
     const toRecentSenderNumber = (recipientJid: string): string => toConversationId(recipientJid);
 
+    const sendRoutedReply = async (params: {
+        replyJid: string;
+        conversationId: string;
+        rawReply: string;
+        incomingWasVoice: boolean;
+        voiceConfig: ResolvedVoiceReplyConfig;
+    }): Promise<void> => {
+        const plan = planVoiceReply(params.rawReply, params.voiceConfig.mode, params.incomingWasVoice);
+        const text = plan.text || 'I could not produce a reply for that message.';
+
+        if (plan.useVoice) {
+            let artifact: Awaited<ReturnType<TextToSpeechService['createVoiceNote']>> | undefined;
+            try {
+                artifact = await textToSpeechService.createVoiceNote(text, params.voiceConfig);
+                const voiceResult = await whatsappService.sendVoiceMessage(params.replyJid, artifact.path);
+                if (voiceResult.success) {
+                    await recentsService.recordMessage({
+                        messageId: voiceResult.messageId ?? `pi-router-voice-${Date.now()}`,
+                        senderNumber: params.conversationId,
+                        senderName: 'Pi',
+                        text,
+                        direction: 'outgoing',
+                        timestamp: Date.now(),
+                    });
+                    logger.log(`[WhatsApp-Pi-Router] Sent ${plan.reason} voice reply to ${params.replyJid}`);
+                    return;
+                }
+                logger.error(`[WhatsApp-Pi-Router] Voice delivery failed; falling back to text: ${voiceResult.error ?? 'unknown error'}`);
+            } catch (error) {
+                logger.error(`[WhatsApp-Pi-Router] TTS failed; falling back to text: ${error instanceof Error ? error.message : String(error)}`);
+            } finally {
+                if (artifact) {
+                    try {
+                        await artifact.cleanup();
+                    } catch (error) {
+                        logger.error('[WhatsApp-Pi-Router] Failed to clean up TTS files:', error);
+                    }
+                }
+            }
+        }
+
+        const textResult = await whatsappService.sendMessage(params.replyJid, text);
+        if (!textResult.success) {
+            throw new Error(textResult.error ?? 'WhatsApp text fallback failed');
+        }
+        await recentsService.recordMessage({
+            messageId: textResult.messageId ?? `pi-router-${Date.now()}`,
+            senderNumber: params.conversationId,
+            senderName: 'Pi',
+            text,
+            direction: 'outgoing',
+            timestamp: Date.now(),
+        });
+    };
+
     const conversationTurnQueues = new Map<string, Promise<unknown>>();
     const enqueueConversationTurn = async <T>(conversationKey: string, task: () => Promise<T>): Promise<T> => {
         const previous = conversationTurnQueues.get(conversationKey) ?? Promise.resolve();
@@ -480,6 +559,13 @@ export default function (pi: ExtensionAPI) {
             });
         }
         const identity = isGroup ? undefined : identityMapService.get(conversationId);
+        let voiceConfig = getDefaultResolvedVoiceReplyConfig();
+        try {
+            voiceConfig = await loadResolvedVoiceReplyConfig();
+        } catch (error) {
+            logger.error('[WhatsApp-Pi-Router] Invalid voice reply settings; using text replies:', error);
+        }
+        const incomingWasVoice = resolved.kind === 'audio';
         const prompt = buildPrompt({
             messageHeader,
             text,
@@ -491,37 +577,33 @@ export default function (pi: ExtensionAPI) {
             participant,
             conversationId,
             identity,
+            voiceReplyMode: voiceConfig.mode,
+            incomingWasVoice,
         });
 
         try {
             const cwd = _ctx?.cwd ?? process.cwd();
-            const reply = await enqueueConversationTurn(replyJid, async () => {
+            await enqueueConversationTurn(replyJid, async () => {
                 const [childPiConfig, sessionLaunch] = await Promise.all([
                     loadResolvedChildPiConfig(),
                     resolveRoutedSessionLaunch(replyJid, cwd)
                 ]);
                 logger.log(`[WhatsApp-Pi-Router] Dispatching ${remoteJid} via reply ${replyJid} to ${sessionLaunch.route.directory} (${sessionLaunch.mode}) with model ${childPiConfig.model ?? 'Pi default'} and thinking ${childPiConfig.thinking ?? 'Pi default'}`);
-                return runPiForConversation({
+                const reply = await runPiForConversation({
                     sessionLaunch,
                     prompt,
                     cwd,
                     childPiConfig,
                     ...(imageBuffer && imageMimeType ? { imageBuffer, imageMimeType } : {}),
                 });
-            });
-            if (reply.trim()) {
-                await whatsappService.sendMessage(replyJid, reply.trim());
-                await recentsService.recordMessage({
-                    messageId: `pi-router-${Date.now()}`,
-                    senderNumber: conversationId,
-                    senderName: 'Pi',
-                    text: reply.trim(),
-                    direction: 'outgoing',
-                    timestamp: Date.now(),
+                await sendRoutedReply({
+                    replyJid,
+                    conversationId,
+                    rawReply: reply,
+                    incomingWasVoice,
+                    voiceConfig,
                 });
-            } else {
-                await whatsappService.sendMessage(replyJid, "I could not produce a reply for that message.");
-            }
+            });
         } catch (error) {
             logger.error('[WhatsApp-Pi-Router] routed Pi reply failed:', error);
             await whatsappService.sendMessage(

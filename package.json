@@ -22,6 +22,11 @@
     ],
     "image": "https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg"
   },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test:build": "node -e \"require('node:fs').rmSync('.test-dist',{recursive:true,force:true})\" && tsc -p tsconfig.test.json",
+    "test": "npm run test:build && node --test .test-dist/tests/*.test.js"
+  },
   "dependencies": {
     "@llamaindex/liteparse": "^1.5.3",
     "@sinclair/typebox": "^0.27.10",

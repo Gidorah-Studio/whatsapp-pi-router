@@ -101,6 +101,10 @@ interface MessageReceiptPayload {
     receipt?: unknown;
 }
 
+type WhatsAppOutgoingContent =
+    | { text: string }
+    | { audio: { url: string }; mimetype: 'audio/ogg; codecs=opus'; ptt: true };
+
 interface WhatsAppSocketLike {
     user?: { id?: string; lid?: string };
     ev: {
@@ -109,7 +113,7 @@ interface WhatsAppSocketLike {
     };
     end(reason?: unknown): void | Promise<void>;
     logout(): Promise<void>;
-    sendMessage(jid: string, content: { text: string }): Promise<{ key?: { id?: string } } | undefined>;
+    sendMessage(jid: string, content: WhatsAppOutgoingContent): Promise<{ key?: { id?: string } } | undefined>;
     sendPresenceUpdate(presence: 'composing' | 'recording' | 'paused', jid: string): Promise<void>;
     readMessages(messages: Array<{ remoteJid: string; id: string; fromMe: boolean }>): Promise<void>;
     groupMetadata(jid: string): Promise<{ id: string; subject: string; participants: Array<{ id: string }> }>;
@@ -876,6 +880,50 @@ export class WhatsAppService {
         }
 
         return result;
+    }
+
+    async sendVoiceMessage(jid: string, audioPath: string) {
+        const recipientJid = await this.resolveLidPreferredRecipientJid(jid);
+        const socket = this.getActiveSocket();
+
+        if (!socket) {
+            return {
+                success: false,
+                error: t('service.whatsapp.notConnected'),
+                attempts: 0,
+                recipientJid
+            };
+        }
+
+        try {
+            await this.sendPresence(recipientJid, 'recording');
+            await this.prepareGroupSession(recipientJid);
+            const response = await socket.sendMessage(recipientJid, {
+                audio: { url: audioPath },
+                mimetype: 'audio/ogg; codecs=opus',
+                ptt: true
+            });
+
+            return {
+                success: true,
+                messageId: response?.key?.id,
+                attempts: 1,
+                recipientJid
+            };
+        } catch (error) {
+            console.error(t('service.whatsapp.failedSendVoiceMessage', {
+                jid: recipientJid,
+                error: error instanceof Error ? error.message : String(error)
+            }));
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : 'Unknown error',
+                attempts: 1,
+                recipientJid
+            };
+        } finally {
+            await this.sendPresence(recipientJid, 'paused');
+        }
     }
 
     async sendMenuMessage(jid: string, text: string) {
