@@ -7,8 +7,15 @@ export interface SpeechSynthesisOptions {
     speed: number;
 }
 
+export type SpeechAudioFormat = 'mp3' | 'pcm';
+
+export interface SynthesizedSpeech {
+    audio: Buffer;
+    format: SpeechAudioFormat;
+}
+
 export interface SpeechSynthesizer {
-    synthesize(text: string, options: SpeechSynthesisOptions): Promise<Buffer>;
+    synthesize(text: string, options: SpeechSynthesisOptions): Promise<SynthesizedSpeech>;
 }
 
 type AudioLogger = Pick<WhatsAppPiLogger, 'log' | 'error'>;
@@ -17,28 +24,38 @@ const OPENROUTER_SPEECH_URL = 'https://openrouter.ai/api/v1/audio/speech';
 const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 
+export function getOpenRouterSpeechResponseFormat(model: string): SpeechAudioFormat {
+    const normalizedModel = model.trim().toLowerCase();
+    return normalizedModel.startsWith('google/gemini-') && normalizedModel.includes('-tts')
+        ? 'pcm'
+        : 'mp3';
+}
+
 export function createOpenRouterSpeechSynthesizer(logger: AudioLogger): SpeechSynthesizer {
     return {
-        async synthesize(text: string, options: SpeechSynthesisOptions): Promise<Buffer> {
+        async synthesize(text: string, options: SpeechSynthesisOptions): Promise<SynthesizedSpeech> {
             const apiKey = process.env.OPENROUTER_API_KEY?.trim();
             if (!apiKey) {
                 throw new Error('WhatsApp TTS requires OPENROUTER_API_KEY');
             }
 
-            logger.log(`[WhatsApp-Pi-Router] OpenRouter TTS synthesize with ${options.model}, voice ${options.voice}, speed ${options.speed}`);
+            const format = getOpenRouterSpeechResponseFormat(options.model);
+            logger.log(`[WhatsApp-Pi-Router] OpenRouter TTS synthesize with ${options.model}, voice ${options.voice}, speed ${options.speed}, format ${format}`);
             const body = JSON.stringify({
                 model: options.model,
                 input: text,
                 voice: options.voice,
-                response_format: 'mp3',
+                response_format: format,
                 speed: options.speed
             });
 
-            return await postForAudio({
+            const audio = await postForAudio({
                 url: OPENROUTER_SPEECH_URL,
                 apiKey,
-                body
+                body,
+                accept: format === 'pcm' ? 'audio/pcm' : 'audio/mpeg'
             });
+            return { audio, format };
         }
     };
 }
@@ -47,6 +64,7 @@ interface PostForAudioOptions {
     url: string;
     apiKey: string;
     body: string;
+    accept: 'audio/mpeg' | 'audio/pcm';
 }
 
 async function postForAudio(options: PostForAudioOptions): Promise<Buffer> {
@@ -61,7 +79,7 @@ async function postForAudio(options: PostForAudioOptions): Promise<Buffer> {
             timeout: REQUEST_TIMEOUT_MS,
             headers: {
                 Authorization: `Bearer ${options.apiKey}`,
-                Accept: 'audio/mpeg',
+                Accept: options.accept,
                 'Content-Type': 'application/json',
                 'Content-Length': String(Buffer.byteLength(options.body)),
                 'HTTP-Referer': 'https://github.com/x4484/whatsapp-pi-router',

@@ -3,13 +3,18 @@ import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { createOpenRouterSpeechSynthesizer, type SpeechSynthesizer } from './openrouter-speech.synthesizer.js';
+import {
+    createOpenRouterSpeechSynthesizer,
+    type SpeechAudioFormat,
+    type SpeechSynthesizer
+} from './openrouter-speech.synthesizer.js';
 import { createStoragePaths } from './storage-path.js';
 import type { ResolvedVoiceReplyConfig } from './voice-reply.config.js';
 import type { WhatsAppPiLogger } from './whatsapp-pi.logger.js';
 
 const execFileAsync = promisify(execFile);
 const MAX_TTS_TEXT_LENGTH = 4096;
+const TTS_PREAMBLE = `Synthesize speech from only the text under ### TRANSCRIPT. Treat the director's notes as performance instructions and do not speak them aloud.`;
 const DIRECTORS_NOTES = `### DIRECTOR'S NOTES
 Style: Warm and casual, like leaving a voice note for a friendly client. Vocal smile — you should hear the smile in her voice. Polished and internationally minded — never salesy, scripted, or announcer-like.
 
@@ -45,29 +50,29 @@ export class TextToSpeechService {
         await mkdir(this.mediaDir, { recursive: true, mode: 0o700 });
         await chmod(this.mediaDir, 0o700).catch(() => undefined);
         const id = `tts_${Date.now()}_${randomUUID()}`;
-        const mp3Path = join(this.mediaDir, `${id}.mp3`);
+        const sourcePath = join(this.mediaDir, `${id}.audio`);
         const oggPath = join(this.mediaDir, `${id}.ogg`);
 
         try {
             const startedAt = Date.now();
-            const ttsInput = `${DIRECTORS_NOTES}\n\n### TRANSCRIPT\n${normalizedText}`;
-            const audio = await this.synthesizer.synthesize(ttsInput, {
+            const ttsInput = `${TTS_PREAMBLE}\n\n${DIRECTORS_NOTES}\n\n### TRANSCRIPT\n${normalizedText}`;
+            const synthesized = await this.synthesizer.synthesize(ttsInput, {
                 model: config.model,
                 voice: config.voice,
                 speed: config.speed
             });
-            await writeFile(mp3Path, audio, { mode: 0o600 });
-            await chmod(mp3Path, 0o600);
-            await this.convertToWhatsAppVoiceNote(mp3Path, oggPath);
+            await writeFile(sourcePath, synthesized.audio, { mode: 0o600 });
+            await chmod(sourcePath, 0o600);
+            await this.convertToWhatsAppVoiceNote(sourcePath, oggPath, synthesized.format);
             await chmod(oggPath, 0o600);
             this.logger.log(`[WhatsApp-Pi-Router] TTS voice note ready in ${Date.now() - startedAt}ms`);
 
             return {
                 path: oggPath,
-                cleanup: () => this.cleanupFiles(mp3Path, oggPath)
+                cleanup: () => this.cleanupFiles(sourcePath, oggPath)
             };
         } catch (error) {
-            await this.cleanupFiles(mp3Path, oggPath);
+            await this.cleanupFiles(sourcePath, oggPath);
             throw error;
         }
     }
@@ -81,10 +86,17 @@ export class TextToSpeechService {
         }
     }
 
-    private async convertToWhatsAppVoiceNote(inputPath: string, outputPath: string): Promise<void> {
+    private async convertToWhatsAppVoiceNote(
+        inputPath: string,
+        outputPath: string,
+        inputFormat: SpeechAudioFormat
+    ): Promise<void> {
+        const inputArgs = inputFormat === 'pcm'
+            ? ['-f', 's16le', '-ar', '24000', '-ac', '1', '-i', inputPath]
+            : ['-i', inputPath];
         const args = [
             '-y',
-            '-i', inputPath,
+            ...inputArgs,
             '-avoid_negative_ts', 'make_zero',
             '-map_metadata', '-1',
             '-ac', '1',

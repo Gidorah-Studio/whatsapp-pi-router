@@ -24,7 +24,7 @@ test('TTS service converts synthesized MP3 into a private OGG/Opus voice note', 
     const synthesizer: SpeechSynthesizer = {
         async synthesize(text) {
             synthesizedInput = text;
-            return generated.stdout;
+            return { audio: generated.stdout, format: 'mp3' };
         }
     };
     const logger = { log() {}, error() {} };
@@ -33,10 +33,35 @@ test('TTS service converts synthesized MP3 into a private OGG/Opus voice note', 
     try {
         const service = new TextToSpeechService(logger, synthesizer, mediaDir);
         const artifact = await service.createVoiceNote('Hello from a test.', getDefaultResolvedVoiceReplyConfig());
-        assert.match(synthesizedInput, /^### DIRECTOR'S NOTES\nStyle: Warm and casual/);
+        assert.match(synthesizedInput, /^Synthesize speech from only the text under ### TRANSCRIPT\./);
+        assert.match(synthesizedInput, /### DIRECTOR'S NOTES\nStyle: Warm and casual/);
         assert.match(synthesizedInput, /Pacing: Relaxed and unhurried/);
         assert.match(synthesizedInput, /When the transcript is in any other language, speak it like a warm, clear native speaker/);
         assert.match(synthesizedInput, /\n\n### TRANSCRIPT\nHello from a test\.$/);
+        const header = (await readFile(artifact.path)).subarray(0, 4).toString('ascii');
+        assert.equal(header, 'OggS');
+        assert.equal((await stat(artifact.path)).mode & 0o777, 0o600);
+
+        await artifact.cleanup();
+        await assert.rejects(access(artifact.path), (error: NodeJS.ErrnoException) => error.code === 'ENOENT');
+    } finally {
+        await rm(mediaDir, { recursive: true, force: true });
+    }
+});
+
+test('TTS service converts Gemini 24 kHz 16-bit mono PCM into OGG/Opus', { skip: !hasFfmpeg }, async () => {
+    const pcmAudio = Buffer.alloc(24_000 * 2 / 5);
+    const synthesizer: SpeechSynthesizer = {
+        async synthesize() {
+            return { audio: pcmAudio, format: 'pcm' };
+        }
+    };
+    const logger = { log() {}, error() {} };
+    const mediaDir = await mkdtemp(join(tmpdir(), 'whatsapp-tts-pcm-test-'));
+
+    try {
+        const service = new TextToSpeechService(logger, synthesizer, mediaDir);
+        const artifact = await service.createVoiceNote('Hello from Gemini.', getDefaultResolvedVoiceReplyConfig());
         const header = (await readFile(artifact.path)).subarray(0, 4).toString('ascii');
         assert.equal(header, 'OggS');
         assert.equal((await stat(artifact.path)).mode & 0o777, 0o600);
