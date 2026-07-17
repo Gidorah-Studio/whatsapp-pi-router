@@ -85,6 +85,8 @@ Voice replies are off by default to avoid surprise API spend. Available modes ar
 
 The router sends text to OpenRouter's `/api/v1/audio/speech` endpoint, receives MP3, converts it with `ffmpeg` to mono OGG/Opus, and sends it through Baileys as a push-to-talk voice note. The default model is `google/gemini-3.1-flash-tts-preview`, with voice `Sulafat` and speed `1`. Models and voice catalogs change over time, so configure a current OpenRouter speech model/voice when overriding the defaults.
 
+Each TTS input includes director's notes before the transcript. They ask for Emily's warm, casual vocal smile, relaxed pacing, clear enunciation, neutral General American English, and native pronunciation for other languages.
+
 TTS uses the same `OPENROUTER_API_KEY` as OpenRouter STT. If synthesis, conversion, or voice delivery fails, the router logs the error and falls back to the cleaned text reply. Replies over 4096 characters also fall back to text rather than being truncated or incurring an unexpectedly large TTS request. Temporary MP3/OGG files are mode `0600` and removed after delivery.
 
 TTS currently applies to automatic replies from routed per-conversation child Pi sessions. Menu sends, the file-backed outbound queue, and legacy main-session forwarding remain text-only.

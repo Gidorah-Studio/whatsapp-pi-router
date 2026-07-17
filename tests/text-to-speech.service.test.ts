@@ -20,8 +20,10 @@ test('TTS service converts synthesized MP3 into a private OGG/Opus voice note', 
     assert.equal(generated.status, 0, generated.stderr?.toString());
     assert.ok(generated.stdout.length > 0);
 
+    let synthesizedInput = '';
     const synthesizer: SpeechSynthesizer = {
-        async synthesize() {
+        async synthesize(text) {
+            synthesizedInput = text;
             return generated.stdout;
         }
     };
@@ -31,6 +33,10 @@ test('TTS service converts synthesized MP3 into a private OGG/Opus voice note', 
     try {
         const service = new TextToSpeechService(logger, synthesizer, mediaDir);
         const artifact = await service.createVoiceNote('Hello from a test.', getDefaultResolvedVoiceReplyConfig());
+        assert.match(synthesizedInput, /^### DIRECTOR'S NOTES\nStyle: Warm and casual/);
+        assert.match(synthesizedInput, /Pacing: Relaxed and unhurried/);
+        assert.match(synthesizedInput, /When the transcript is in any other language, speak it like a warm, clear native speaker/);
+        assert.match(synthesizedInput, /\n\n### TRANSCRIPT\nHello from a test\.$/);
         const header = (await readFile(artifact.path)).subarray(0, 4).toString('ascii');
         assert.equal(header, 'OggS');
         assert.equal((await stat(artifact.path)).mode & 0o777, 0o600);

@@ -10,6 +10,12 @@ import type { WhatsAppPiLogger } from './whatsapp-pi.logger.js';
 
 const execFileAsync = promisify(execFile);
 const MAX_TTS_TEXT_LENGTH = 4096;
+const DIRECTORS_NOTES = `### DIRECTOR'S NOTES
+Style: Warm and casual, like leaving a voice note for a friendly client. Vocal smile — you should hear the smile in her voice. Polished and internationally minded — never salesy, scripted, or announcer-like.
+
+Pacing: Relaxed and unhurried, with natural pauses. Clear enunciation at all times.
+
+Accent: Emily is a well-traveled American professional who is fluently multilingual. When the transcript is in English, use a neutral, educated General American accent — no strong regionalisms or slang. When the transcript is in any other language, speak it like a warm, clear native speaker of that language — never with an American accent.`;
 
 export interface VoiceNoteArtifact {
     path: string;
@@ -44,7 +50,8 @@ export class TextToSpeechService {
 
         try {
             const startedAt = Date.now();
-            const audio = await this.synthesizer.synthesize(normalizedText, {
+            const ttsInput = `${DIRECTORS_NOTES}\n\n### TRANSCRIPT\n${normalizedText}`;
+            const audio = await this.synthesizer.synthesize(ttsInput, {
                 model: config.model,
                 voice: config.voice,
                 speed: config.speed
