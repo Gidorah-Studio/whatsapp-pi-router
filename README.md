@@ -14,7 +14,7 @@ Each WhatsApp thread gets a deterministic private session directory:
 On each inbound message, the extension runs a headless Pi turn that continues the latest session in that conversation directory:
 
 ```bash
-pi --session-dir <conversation-directory> --continue [--model <provider/model>] [--thinking <level>] --no-extensions --print "<message>"
+pi --session-dir <conversation-directory> --continue [--model <provider/model>] [--thinking <level>] --no-extensions --extension <child-media-extension> --print "<message>"
 ```
 
 Pi generates the session's standard UUIDv7 identifier. The directory keeps contacts and groups isolated without exposing custom router IDs to model providers. The model and thinking arguments are included when configured, and the final stdout is sent back to the originating WhatsApp chat.
@@ -90,6 +90,14 @@ Each TTS input includes a clear synthesis preamble and director's notes before t
 TTS uses the same `OPENROUTER_API_KEY` as OpenRouter STT. If synthesis, conversion, or voice delivery fails, the router logs the error and falls back to the cleaned text reply. Replies over 4096 characters also fall back to text rather than being truncated or incurring an unexpectedly large TTS request. Temporary source-audio/OGG files are mode `0600` and removed after delivery.
 
 TTS currently applies to automatic replies from routed per-conversation child Pi sessions. Menu sends, the file-backed outbound queue, and legacy main-session forwarding remain text-only.
+
+## Generated image replies
+
+Routed child Pi sessions have a dedicated `send_wa_image(path, caption?)` tool. An image skill should render the requested image to a local file, then call this tool with the file path and an optional caption. The tool is bound to the current routed conversation, so it does not accept a recipient JID.
+
+The child process copies the image into a private per-turn handoff directory. After the child exits, the parent router independently validates the handoff, sends the image through its connected Baileys socket, records the outgoing message, and removes the staged files. PNG and JPEG images up to 5 MiB are accepted; captions are limited to 1024 characters. If image delivery fails, the router sends the caption or a short text failure notice instead.
+
+The main WhatsApp extension is still disabled inside child sessions to prevent recursive router startup. Only the small media-handoff extension that provides `send_wa_image` is explicitly loaded.
 
 ## Identity mapping and LID routing
 
@@ -185,7 +193,7 @@ npm test
 
 ## Notes
 
-- Child Pi turns use `--no-extensions` to avoid recursively starting another WhatsApp router.
+- Child Pi turns use `--no-extensions` and explicitly load only the non-recursive `send_wa_image` handoff extension.
 - Session history remains persistent because each WhatsApp JID maps to one stable private session directory.
 - Turns for the same conversation are serialized so simultaneous messages cannot create or update competing sessions.
 - Streaming is intentionally not implemented; WhatsApp receives the final answer once the child Pi turn completes.

@@ -47,6 +47,7 @@ const fallback = {
     "service.whatsapp.ignoredNotAllowed": "Ignoring message from {senderJid} (not in allow list)",
     "service.whatsapp.failedSendMessage": "Failed to send message to {jid}: {error}",
     "service.whatsapp.failedSendVoiceMessage": "Failed to send voice message to {jid}: {error}",
+    "service.whatsapp.failedSendImageMessage": "Failed to send image message to {jid}: {error}",
     "service.whatsapp.failedSendMenuMessage": "Failed to send menu message to {jid}:",
     "service.whatsapp.failedPresenceUpdate": "Failed to send presence update to {jid}:",
     "service.whatsapp.failedMarkRead": "Failed to mark message as read:",

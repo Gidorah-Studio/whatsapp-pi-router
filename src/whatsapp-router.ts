@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { SessionManager } from './services/session.manager.js';
@@ -27,6 +28,17 @@ import {
     type VoiceReplyMode
 } from './services/voice-reply.config.js';
 import { buildVoiceReplyPromptLines, planVoiceReply } from './services/voice-reply.service.js';
+import { createStoragePaths } from './services/storage-path.js';
+import {
+    cleanupImageHandoff,
+    createImageHandoffDirectory,
+    loadImageHandoff,
+    type RoutedImageHandoff
+} from './services/outbound-image.service.js';
+
+const CHILD_WHATSAPP_MEDIA_EXTENSION_PATH = fileURLToPath(
+    new URL('./child-whatsapp-media.extension.ts', import.meta.url)
+);
 
 const shutdownState = globalThis as typeof globalThis & {
     __whatsappPiShutdown?: {
@@ -107,9 +119,15 @@ const buildPrompt = (params: {
     '',
     `${params.messageHeader} ${params.text}`,
     '',
-    'Reply naturally to the WhatsApp sender. Return only the message text to send back.',
+    'Reply naturally to the WhatsApp sender. For a normal reply, return only the message text to send back. When the user requests an image, create the image file and call send_wa_image(path, caption?) instead; do not merely promise to create or send it.',
     ...buildVoiceReplyPromptLines(params.voiceReplyMode, params.incomingWasVoice),
 ].join('\n');
+
+interface RoutedPiTurnResult {
+    text: string;
+    image?: RoutedImageHandoff;
+    cleanup(): Promise<void>;
+}
 
 const runPiForConversation = async (params: {
     sessionLaunch: RoutedSessionLaunch;
@@ -118,62 +136,80 @@ const runPiForConversation = async (params: {
     imageBuffer?: Buffer;
     imageMimeType?: string;
     childPiConfig: ResolvedChildPiConfig;
-}): Promise<string> => {
+}): Promise<RoutedPiTurnResult> => {
     const piBin = process.env.WHATSAPP_PI_ROUTER_PI_BIN || 'pi';
     const args = [...params.sessionLaunch.args];
+    const handoffDir = await createImageHandoffDirectory(createStoragePaths().mediaDir);
 
-    if (params.childPiConfig.model) {
-        args.push('--model', params.childPiConfig.model);
-    }
-    if (params.childPiConfig.thinking) {
-        args.push('--thinking', params.childPiConfig.thinking);
-    }
-    args.push('--no-extensions', '--print');
+    try {
+        if (params.childPiConfig.model) {
+            args.push('--model', params.childPiConfig.model);
+        }
+        if (params.childPiConfig.thinking) {
+            args.push('--thinking', params.childPiConfig.thinking);
+        }
+        args.push(
+            '--no-extensions',
+            '--extension', CHILD_WHATSAPP_MEDIA_EXTENSION_PATH,
+            '--print'
+        );
 
-    if (params.imageBuffer && params.imageMimeType) {
-        const ext = params.imageMimeType.includes('png') ? 'png' : params.imageMimeType.includes('webp') ? 'webp' : 'jpg';
-        const dir = join(tmpdir(), 'whatsapp-pi-router');
-        await mkdir(dir, { recursive: true });
-        const imagePath = join(dir, `${params.sessionLaunch.route.key}-${Date.now()}.${ext}`);
-        await writeFile(imagePath, params.imageBuffer);
-        args.push(`@${imagePath}`);
-    }
+        if (params.imageBuffer && params.imageMimeType) {
+            const ext = params.imageMimeType.includes('png') ? 'png' : params.imageMimeType.includes('webp') ? 'webp' : 'jpg';
+            const dir = join(tmpdir(), 'whatsapp-pi-router');
+            await mkdir(dir, { recursive: true });
+            const imagePath = join(dir, `${params.sessionLaunch.route.key}-${Date.now()}.${ext}`);
+            await writeFile(imagePath, params.imageBuffer);
+            args.push(`@${imagePath}`);
+        }
 
-    args.push(params.prompt);
+        args.push(params.prompt);
 
-    return await new Promise<string>((resolve, reject) => {
-        const child = spawn(piBin, args, {
-            cwd: params.cwd,
-            env: {
-                ...process.env,
-                WHATSAPP_PI_ROUTER_CHILD: '1',
-            },
-            stdio: ['ignore', 'pipe', 'pipe'],
+        const text = await new Promise<string>((resolve, reject) => {
+            const child = spawn(piBin, args, {
+                cwd: params.cwd,
+                env: {
+                    ...process.env,
+                    WHATSAPP_PI_ROUTER_CHILD: '1',
+                    WHATSAPP_PI_ROUTER_IMAGE_HANDOFF_DIR: handoffDir,
+                },
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            let stdout = '';
+            let stderr = '';
+            const timer = setTimeout(() => {
+                child.kill('SIGTERM');
+                reject(new Error('Timed out waiting for Pi response'));
+            }, Number(process.env.WHATSAPP_PI_ROUTER_TIMEOUT_MS || 10 * 60 * 1000));
+
+            child.stdout.setEncoding('utf8');
+            child.stderr.setEncoding('utf8');
+            child.stdout.on('data', (chunk) => { stdout += chunk; });
+            child.stderr.on('data', (chunk) => { stderr += chunk; });
+            child.on('error', (error) => {
+                clearTimeout(timer);
+                reject(error);
+            });
+            child.on('close', (code) => {
+                clearTimeout(timer);
+                if (code === 0) {
+                    resolve(stdout.trim());
+                } else {
+                    reject(new Error(stderr.trim() || `pi exited with code ${code}`));
+                }
+            });
         });
-        let stdout = '';
-        let stderr = '';
-        const timer = setTimeout(() => {
-            child.kill('SIGTERM');
-            reject(new Error('Timed out waiting for Pi response'));
-        }, Number(process.env.WHATSAPP_PI_ROUTER_TIMEOUT_MS || 10 * 60 * 1000));
+        const image = await loadImageHandoff(handoffDir);
 
-        child.stdout.setEncoding('utf8');
-        child.stderr.setEncoding('utf8');
-        child.stdout.on('data', (chunk) => { stdout += chunk; });
-        child.stderr.on('data', (chunk) => { stderr += chunk; });
-        child.on('error', (error) => {
-            clearTimeout(timer);
-            reject(error);
-        });
-        child.on('close', (code) => {
-            clearTimeout(timer);
-            if (code === 0) {
-                resolve(stdout.trim());
-            } else {
-                reject(new Error(stderr.trim() || `pi exited with code ${code}`));
-            }
-        });
-    });
+        return {
+            text,
+            ...(image ? { image } : {}),
+            cleanup: () => cleanupImageHandoff(handoffDir)
+        };
+    } catch (error) {
+        await cleanupImageHandoff(handoffDir).catch(() => undefined);
+        throw error;
+    }
 };
 
 export default function (pi: ExtensionAPI) {
@@ -408,13 +444,46 @@ export default function (pi: ExtensionAPI) {
         replyJid: string;
         conversationId: string;
         rawReply: string;
+        image?: RoutedImageHandoff;
         incomingWasVoice: boolean;
         voiceConfig: ResolvedVoiceReplyConfig;
     }): Promise<void> => {
         const plan = planVoiceReply(params.rawReply, params.voiceConfig.mode, params.incomingWasVoice);
-        const text = plan.text || 'I could not produce a reply for that message.';
+        const text = params.image
+            ? (params.image.caption || 'I created the image, but WhatsApp could not deliver it.')
+            : (plan.text || 'I could not produce a reply for that message.');
 
-        if (plan.useVoice) {
+        if (params.image) {
+            try {
+                const imageResult = await whatsappService.sendImageMessage(
+                    params.replyJid,
+                    params.image.path,
+                    params.image.mimeType,
+                    params.image.caption
+                );
+                if (imageResult.success) {
+                    try {
+                        await recentsService.recordMessage({
+                            messageId: imageResult.messageId ?? `pi-router-image-${Date.now()}`,
+                            senderNumber: params.conversationId,
+                            senderName: 'Pi',
+                            text: params.image.caption || '[Image]',
+                            direction: 'outgoing',
+                            timestamp: Date.now(),
+                        });
+                    } catch (error) {
+                        logger.error('[WhatsApp-Pi-Router] Image sent but failed to record it in recents:', error);
+                    }
+                    logger.log(`[WhatsApp-Pi-Router] Sent image reply to ${params.replyJid}`);
+                    return;
+                }
+                logger.error(`[WhatsApp-Pi-Router] Image delivery failed; falling back to text: ${imageResult.error ?? 'unknown error'}`);
+            } catch (error) {
+                logger.error(`[WhatsApp-Pi-Router] Image delivery failed; falling back to text: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }
+
+        if (plan.useVoice && !params.image) {
             let artifact: Awaited<ReturnType<TextToSpeechService['createVoiceNote']>> | undefined;
             try {
                 artifact = await textToSpeechService.createVoiceNote(text, params.voiceConfig);
@@ -589,20 +658,27 @@ export default function (pi: ExtensionAPI) {
                     resolveRoutedSessionLaunch(replyJid, cwd)
                 ]);
                 logger.log(`[WhatsApp-Pi-Router] Dispatching ${remoteJid} via reply ${replyJid} to ${sessionLaunch.route.directory} (${sessionLaunch.mode}) with model ${childPiConfig.model ?? 'Pi default'} and thinking ${childPiConfig.thinking ?? 'Pi default'}`);
-                const reply = await runPiForConversation({
+                const turnResult = await runPiForConversation({
                     sessionLaunch,
                     prompt,
                     cwd,
                     childPiConfig,
                     ...(imageBuffer && imageMimeType ? { imageBuffer, imageMimeType } : {}),
                 });
-                await sendRoutedReply({
-                    replyJid,
-                    conversationId,
-                    rawReply: reply,
-                    incomingWasVoice,
-                    voiceConfig,
-                });
+                try {
+                    await sendRoutedReply({
+                        replyJid,
+                        conversationId,
+                        rawReply: turnResult.text,
+                        ...(turnResult.image ? { image: turnResult.image } : {}),
+                        incomingWasVoice,
+                        voiceConfig,
+                    });
+                } finally {
+                    await turnResult.cleanup().catch(error => {
+                        logger.error('[WhatsApp-Pi-Router] Failed to clean up image handoff files:', error);
+                    });
+                }
             });
         } catch (error) {
             logger.error('[WhatsApp-Pi-Router] routed Pi reply failed:', error);

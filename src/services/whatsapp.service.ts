@@ -12,6 +12,7 @@ import { installBaileysConsoleFilter } from './baileys-console-filter.js';
 import { t } from '../i18n.js';
 import { appendFileSync } from 'fs';
 import { createStoragePaths } from './storage-path.js';
+import type { WhatsAppImageMimeType } from './outbound-image.service.js';
 
 const LOG_FILE = createStoragePaths().logPath;
 function fileLog(msg: string) {
@@ -103,7 +104,8 @@ interface MessageReceiptPayload {
 
 type WhatsAppOutgoingContent =
     | { text: string }
-    | { audio: { url: string }; mimetype: 'audio/ogg; codecs=opus'; ptt: true };
+    | { audio: { url: string }; mimetype: 'audio/ogg; codecs=opus'; ptt: true }
+    | { image: { url: string }; mimetype: WhatsAppImageMimeType; caption?: string };
 
 interface WhatsAppSocketLike {
     user?: { id?: string; lid?: string };
@@ -912,6 +914,55 @@ export class WhatsAppService {
             };
         } catch (error) {
             console.error(t('service.whatsapp.failedSendVoiceMessage', {
+                jid: recipientJid,
+                error: error instanceof Error ? error.message : String(error)
+            }));
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : 'Unknown error',
+                attempts: 1,
+                recipientJid
+            };
+        } finally {
+            await this.sendPresence(recipientJid, 'paused');
+        }
+    }
+
+    async sendImageMessage(
+        jid: string,
+        imagePath: string,
+        mimeType: WhatsAppImageMimeType,
+        caption?: string
+    ) {
+        const recipientJid = await this.resolveLidPreferredRecipientJid(jid);
+        const socket = this.getActiveSocket();
+
+        if (!socket) {
+            return {
+                success: false,
+                error: t('service.whatsapp.notConnected'),
+                attempts: 0,
+                recipientJid
+            };
+        }
+
+        try {
+            await this.sendPresence(recipientJid, 'composing');
+            await this.prepareGroupSession(recipientJid);
+            const response = await socket.sendMessage(recipientJid, {
+                image: { url: imagePath },
+                mimetype: mimeType,
+                ...(caption ? { caption } : {})
+            });
+
+            return {
+                success: true,
+                messageId: response?.key?.id,
+                attempts: 1,
+                recipientJid
+            };
+        } catch (error) {
+            console.error(t('service.whatsapp.failedSendImageMessage', {
                 jid: recipientJid,
                 error: error instanceof Error ? error.message : String(error)
             }));
