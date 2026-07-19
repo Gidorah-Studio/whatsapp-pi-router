@@ -18,6 +18,18 @@ export interface Contact {
     sendNumber?: string;
 }
 
+const SESSION_STATUSES = new Set<SessionStatus>([
+    'logged-out',
+    'connecting',
+    'pairing',
+    'connected',
+    'disconnected',
+    'reconnecting',
+    'reauth-required',
+    'connection-conflict',
+    'stopped'
+]);
+
 export class SessionManager {
     private readonly storagePaths: StoragePaths;
     private authStateDir: string;
@@ -112,7 +124,7 @@ export class SessionManager {
             this.allowList = loadedAllowList.filter(c => !SessionManager.isGroupJid(c.number));
             this.allowedGroups = this.mergeContacts(loadedAllowedGroups, migratedGroups);
             this.ignoredNumbers = (config.ignoredNumbers || []).map(cleanContact).filter(Boolean) as Contact[];
-            this.status = config.status || 'logged-out';
+            this.status = SESSION_STATUSES.has(config.status) ? config.status : 'logged-out';
             this.hasAuthState = Boolean(config.hasAuthState);
             this.openaiKey = config.openaiKey || '';
             this.visionModel = config.visionModel || 'gpt-4o';
@@ -182,7 +194,7 @@ export class SessionManager {
     public async saveConfig() {
         const tempPath = `${this.configPath}.${process.pid}.${Date.now()}.tmp`;
         try {
-            this.hasAuthState = this.hasAuthState || await this.hasCredentialsFile();
+            this.hasAuthState = await this.hasCredentialsFile();
             const config = {
                 allowList: this.allowList,
                 allowedGroups: this.allowedGroups,
@@ -444,8 +456,9 @@ export class SessionManager {
     }
 
     async markAuthStateAvailable() {
-        if (!this.hasAuthState) {
-            this.hasAuthState = true;
+        const registered = await this.hasCredentialsFile();
+        if (registered !== this.hasAuthState) {
+            this.hasAuthState = registered;
             await this.saveConfig();
         }
     }
@@ -453,6 +466,49 @@ export class SessionManager {
     async getAuthState() {
         await this.ensureStorageDirectories();
         return await useMultiFileAuthState(this.authStateDir);
+    }
+
+    async quarantineAuthState(reason: string): Promise<string | undefined> {
+        await this.ensureStorageDirectories();
+        const entries = await readdir(this.authStateDir);
+        const safeReason = reason.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 64) || 'reset';
+        let quarantinePath: string | undefined;
+
+        if (entries.length > 0) {
+            await mkdir(this.storagePaths.authQuarantineDir, { recursive: true, mode: 0o700 });
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            quarantinePath = join(
+                this.storagePaths.authQuarantineDir,
+                `${basename(this.authStateDir)}-${timestamp}-${process.pid}-${safeReason}`
+            );
+            await rename(this.authStateDir, quarantinePath);
+            await mkdir(this.authStateDir, { recursive: true, mode: 0o700 });
+            try {
+                await this.pruneAuthQuarantine();
+            } catch (error) {
+                console.warn('[WhatsApp-Pi] Failed to prune old auth quarantine directories:', error);
+            }
+        }
+
+        this.hasAuthState = false;
+        this.status = 'reauth-required';
+        await this.saveConfig();
+        return quarantinePath;
+    }
+
+    private async pruneAuthQuarantine(keep = 3) {
+        const prefix = `${basename(this.authStateDir)}-`;
+        const entries = await readdir(this.storagePaths.authQuarantineDir, { withFileTypes: true });
+        const stale = entries
+            .filter(entry => entry.isDirectory() && entry.name.startsWith(prefix))
+            .map(entry => entry.name)
+            .sort()
+            .reverse()
+            .slice(keep);
+        await Promise.all(stale.map(entry => rm(join(this.storagePaths.authQuarantineDir, entry), {
+            recursive: true,
+            force: true
+        })));
     }
 
     private async syncAuthStateFromDisk() {
@@ -470,23 +526,21 @@ export class SessionManager {
 
     private async hasCredentialsFile(): Promise<boolean> {
         try {
-            await readFile(join(this.authStateDir, 'creds.json'));
-            return true;
+            const credentials = JSON.parse(await readFile(join(this.authStateDir, 'creds.json'), 'utf8')) as {
+                registered?: unknown;
+            };
+            return credentials.registered === true;
         } catch {
             return false;
         }
     }
 
     async deleteAuthState() {
-        try {
-            await rm(this.authStateDir, { recursive: true, force: true });
-            await mkdir(this.authStateDir, { recursive: true });
-            this.status = 'logged-out';
-            this.hasAuthState = false;
-            await this.saveConfig();
-        } catch (error) {
-            console.error(t('session.manager.failedDeleteAuthState'), error);
-        }
+        await rm(this.authStateDir, { recursive: true, force: true });
+        await mkdir(this.authStateDir, { recursive: true, mode: 0o700 });
+        this.status = 'logged-out';
+        this.hasAuthState = false;
+        await this.saveConfig();
     }
 
     getStatus(): SessionStatus {
@@ -527,5 +581,9 @@ export class SessionManager {
 
     getAuthStateDir(): string {
         return this.authStateDir;
+    }
+
+    getInstanceLockPath(): string {
+        return `${this.authStateDir}.lock`;
     }
 }

@@ -29,6 +29,8 @@ import {
 } from './services/voice-reply.config.js';
 import { buildVoiceReplyPromptLines, planVoiceReply } from './services/voice-reply.service.js';
 import { createStoragePaths } from './services/storage-path.js';
+import { ConnectionEventJournal } from './services/connection-lifecycle.js';
+import { RouterInstanceLock, RouterInstanceLockError } from './services/router-instance-lock.js';
 import {
     cleanupImageHandoff,
     createImageHandoffDirectory,
@@ -235,7 +237,8 @@ export default function (pi: ExtensionAPI) {
     });
 
     const sessionManager = new SessionManager();
-    const whatsappService = new WhatsAppService(sessionManager);
+    const connectionJournal = new ConnectionEventJournal();
+    const whatsappService = new WhatsAppService(sessionManager, connectionJournal);
     const recentsService = new RecentsService(sessionManager);
     const identityMapService = new IdentityMapService();
     const logger = new WhatsAppPiLogger(false);
@@ -245,6 +248,79 @@ export default function (pi: ExtensionAPI) {
     const incomingMediaService = new IncomingMediaService(audioService, logger);
     const menuHandler = new MenuHandler(whatsappService, sessionManager, recentsService, identityMapService);
     let _ctx: ExtensionContext | undefined;
+    let instanceLock: RouterInstanceLock | undefined;
+    let routerActive = false;
+    let ownershipPromise: Promise<void> | undefined;
+
+    const acquireRouterOwnership = async () => {
+        if (instanceLock?.isHeld()) return;
+        if (!instanceLock) {
+            throw new Error('WhatsApp router lock is not initialized yet. Wait for Pi startup to finish.');
+        }
+        if (ownershipPromise) {
+            await ownershipPromise;
+            return;
+        }
+
+        ownershipPromise = (async () => {
+            let recoveredStaleLock = false;
+            try {
+                ({ recoveredStaleLock } = await instanceLock!.acquire());
+            } catch (error) {
+                const message = error instanceof RouterInstanceLockError
+                    ? error.message
+                    : `Could not acquire WhatsApp router lock: ${error instanceof Error ? error.message : String(error)}`;
+                await whatsappService.recordLifecycleEvent({
+                    type: 'instance-lock-rejected',
+                    state: 'connection-conflict',
+                    classification: error instanceof RouterInstanceLockError ? 'connection-conflict' : 'unknown',
+                    action: error instanceof RouterInstanceLockError ? 'resolve-conflict' : 'none',
+                    reason: error instanceof RouterInstanceLockError
+                        ? 'another-router-process-is-active'
+                        : 'instance-lock-acquisition-failed',
+                    error: message
+                });
+                throw error instanceof RouterInstanceLockError ? error : new Error(message);
+            }
+
+            routerActive = true;
+            await whatsappService.recordLifecycleEvent({
+                type: 'instance-lock-acquired',
+                state: 'stopped',
+                action: 'none',
+                reason: recoveredStaleLock ? 'stale-lock-recovered' : 'exclusive-lock-acquired',
+                intentional: true
+            });
+
+            try {
+                await outboundQueueService.start();
+            } catch (error) {
+                routerActive = false;
+                await instanceLock!.release();
+                const message = `WhatsApp router initialization failed after acquiring the instance lock: ${error instanceof Error ? error.message : String(error)}`;
+                await whatsappService.recordLifecycleEvent({
+                    type: 'router-initialization-failed',
+                    state: 'stopped',
+                    classification: 'unknown',
+                    action: 'none',
+                    reason: 'outbound-queue-start-failed',
+                    error: message
+                });
+                throw new Error(message);
+            }
+        })();
+
+        try {
+            await ownershipPromise;
+        } finally {
+            ownershipPromise = undefined;
+        }
+    };
+
+    whatsappService.setInstanceOwnershipHandlers(
+        () => instanceLock?.isHeld() === true,
+        acquireRouterOwnership
+    );
 
     const formatFooterStatus = (status: string) => {
         if (status !== t("service.whatsapp.connected")) {
@@ -271,9 +347,56 @@ export default function (pi: ExtensionAPI) {
 
     const refreshFooterStatus = () => {
         if (!_ctx) return;
-        _ctx.ui.setStatus('whatsapp', formatFooterStatus(whatsappService.getStatus() === 'connected'
-            ? t("service.whatsapp.connected")
-            : t("service.whatsapp.disconnected")));
+        const status = whatsappService.getEffectiveStatus();
+        const displayStatus = status === 'connected'
+            ? t('service.whatsapp.connected')
+            : status === 'connecting'
+                ? t('service.whatsapp.connecting')
+                : status === 'reconnecting'
+                    ? t('service.whatsapp.reconnecting')
+                    : status === 'reauth-required'
+                        ? t('service.whatsapp.reauthRequired')
+                        : status === 'connection-conflict'
+                            ? t('service.whatsapp.conflict')
+                            : t('service.whatsapp.disconnected');
+        _ctx.ui.setStatus('whatsapp', formatFooterStatus(displayStatus));
+    };
+
+    let stopPromise: Promise<void> | undefined;
+    const stopRouter = async () => {
+        if (stopPromise) {
+            await stopPromise;
+            return;
+        }
+        if (!routerActive && !instanceLock?.isHeld()) {
+            return;
+        }
+
+        stopPromise = (async () => {
+            try {
+                outboundQueueService.stop();
+                if (routerActive) {
+                    await whatsappService.stop();
+                }
+                await whatsappService.recordLifecycleEvent({
+                    type: 'instance-lock-released',
+                    state: 'stopped',
+                    classification: 'intentional',
+                    action: 'none',
+                    reason: 'extension-stop',
+                    intentional: true
+                });
+            } finally {
+                routerActive = false;
+                await instanceLock?.release();
+            }
+        })();
+
+        try {
+            await stopPromise;
+        } finally {
+            stopPromise = undefined;
+        }
     };
 
     const installGracefulShutdownHandlers = () => {
@@ -347,7 +470,16 @@ export default function (pi: ExtensionAPI) {
             logger.log(`[WhatsApp-Pi] Group-only mode: bound to ${boundGroupJid}`);
         }
 
+        instanceLock ??= new RouterInstanceLock(sessionManager.getInstanceLockPath());
+
         await sessionManager.ensureInitialized();
+        await whatsappService.recordLifecycleEvent({
+            type: 'extension-start',
+            state: sessionManager.getStatus(),
+            action: 'none',
+            reason: pi.getFlag('whatsapp-pi-online') === true ? 'auto-connect-enabled' : 'extension-loaded-offline',
+            authStatePresent: await sessionManager.isRegistered()
+        });
         const routerAllowConfig = await loadRouterAllowConfig();
         sessionManager.setAllowAllDirectChats(routerAllowConfig.allowAllDirectChats);
         sessionManager.setAllowAllGroups(routerAllowConfig.allowAllGroups);
@@ -362,14 +494,10 @@ export default function (pi: ExtensionAPI) {
         }
         await recentsService.ensureInitialized();
         await identityMapService.ensureInitialized();
-        await outboundQueueService.start();
         installGracefulShutdownHandlers();
         shutdownState.__whatsappPiShutdown = {
             installed: shutdownState.__whatsappPiShutdown?.installed ?? false,
-            stop: async () => {
-                outboundQueueService.stop();
-                await whatsappService.stop();
-            }
+            stop: stopRouter
         };
         whatsappService.setIncomingMessageRecorder(async (message) => {
             const isGroup = message.remoteJid.endsWith('@g.us');
@@ -384,26 +512,14 @@ export default function (pi: ExtensionAPI) {
             });
         });
 
-        const savedStateEntry = [...ctx.sessionManager.getEntries()]
-            .reverse()
-            .find(entry => entry.type === "custom" && entry.customType === "whatsapp-state");
         const isWhatsappPiOn = pi.getFlag("whatsapp-pi-online") === true;
         const registered = await sessionManager.isRegistered();
 
-        if (savedStateEntry) {
-            const data = (savedStateEntry as { data?: any }).data;
-            if (data.status) {
-                const restoredStatus = data.status === 'connected' && !(isWhatsappPiOn && registered)
-                    ? 'disconnected'
-                    : data.status;
-                await sessionManager.setStatus(restoredStatus);
-            }
-            // Deliberately do not restore allowList/allowedGroups from session
-            // history. Disk config is the source of truth for contacts/groups;
-            // old session snapshots can contain stale allow/ignore state.
-        }
+        // Disk state is authoritative. Session-history snapshots can outlive a
+        // remote logout and must not overwrite reauth-required/conflict states.
+        const reauthenticationRequired = sessionManager.getStatus() === 'reauth-required';
 
-        if (isWhatsappPiOn && registered) {
+        if (isWhatsappPiOn && registered && !reauthenticationRequired) {
             ctx.ui.setStatus('whatsapp', '| WhatsApp: Auto-connecting...');
 
             // Retry logic (max 3 attempts, 3s delay)
@@ -414,18 +530,26 @@ export default function (pi: ExtensionAPI) {
                 attempts++;
                 try {
                     await whatsappService.start({ allowPairingOnAuthFailure: false });
-                } catch {
+                } catch (error) {
+                    if (error instanceof RouterInstanceLockError) {
+                        ctx.ui.notify(error.message, 'error');
+                        ctx.ui.setStatus('whatsapp', '| WhatsApp: Disabled (Another Router Instance)');
+                        return;
+                    }
                     if (attempts < maxAttempts) {
                         ctx.ui.notify(`WhatsApp: Connection attempt ${attempts} failed. Retrying...`, 'warning');
                         setTimeout(tryConnect, 3000);
                     } else {
                         ctx.ui.notify('WhatsApp: Auto-connect failed after multiple attempts.', 'error');
-                        ctx.ui.setStatus('whatsapp', '|  WhatsApp: Connection Failed');
+                        ctx.ui.setStatus('whatsapp', '| WhatsApp: Connection Failed');
                     }
                 }
             };
 
             await tryConnect();
+        } else if (isWhatsappPiOn && reauthenticationRequired) {
+            ctx.ui.setStatus('whatsapp', t('service.whatsapp.reauthRequired'));
+            ctx.ui.notify('WhatsApp credentials were rejected. Open /whatsapp and choose Pair New Device to start a fresh QR pairing without restarting Pi.', 'warning');
         } else if (isWhatsappPiOn) {
             ctx.ui.notify('WhatsApp: Auto-connect requested, but no saved WhatsApp credentials were found. Use Connect WhatsApp once to scan the QR code.', 'warning');
         } else {
@@ -689,6 +813,55 @@ export default function (pi: ExtensionAPI) {
         }
     });
 
+    // Register sanitized connection diagnostics for the operator Pi. Routed
+    // child sessions run without this extension and cannot access this tool.
+    pi.registerTool({
+        name: 'get_whatsapp_health',
+        label: 'Get WhatsApp Connection Health',
+        description: 'Inspect sanitized WhatsApp router health, connection state, retry timing, last disconnect reason, instance-lock ownership, and recent lifecycle events. Use whenever the operator asks why WhatsApp is disconnected, whether it is connected, or requests WhatsApp logs/status. Does not expose messages, contacts, QR data, or credentials.',
+        promptSnippet: 'get_whatsapp_health() - Inspect sanitized WhatsApp connection diagnostics and recent lifecycle events. Use this instead of refusing requests to diagnose WhatsApp connectivity.',
+        parameters: Type.Object({}),
+        async execute() {
+            const diagnostics = await whatsappService.getDiagnostics();
+            const selectEventFields = (event: typeof diagnostics.recentEvents[number]) => ({
+                timestamp: event.timestamp,
+                type: event.type,
+                state: event.state,
+                classification: event.classification,
+                action: event.action,
+                statusCode: event.statusCode,
+                reason: event.reason,
+                error: event.error,
+                reconnectAttempt: event.reconnectAttempt,
+                nextRetryAt: event.nextRetryAt,
+                intentional: event.intentional
+            });
+            return {
+                isError: false,
+                details: undefined,
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify({
+                        status: diagnostics.status,
+                        authStatePresent: diagnostics.authStatePresent,
+                        instanceLockOwned: diagnostics.instanceLockOwned,
+                        operatorActionRequired: diagnostics.operatorActionRequired,
+                        reconnectAttempts: diagnostics.reconnectAttempts,
+                        nextRetryAt: diagnostics.nextRetryAt,
+                        connectedSince: diagnostics.connectedSince,
+                        processStartedAt: diagnostics.processStartedAt,
+                        processUptimeSeconds: diagnostics.processUptimeSeconds,
+                        eventLogPath: diagnostics.eventLogPath,
+                        lastDisconnect: diagnostics.lastDisconnect
+                            ? selectEventFields(diagnostics.lastDisconnect)
+                            : undefined,
+                        recentEvents: diagnostics.recentEvents.slice(-10).map(selectEventFields)
+                    })
+                }]
+            };
+        }
+    });
+
     // Register send_wa_message tool (LLM-callable)
     pi.registerTool({
         name: "send_wa_message",
@@ -923,12 +1096,6 @@ export default function (pi: ExtensionAPI) {
             _ctx = ctx;
             await menuHandler.handleCommand(ctx);
 
-            // Persist only connection status in the Pi session. The disk config
-            // file is the source of truth for allow/ignore lists; persisting
-            // contacts in session history can resurrect stale allowlists.
-            pi.appendEntry("whatsapp-state", {
-                status: sessionManager.getStatus()
-            });
             refreshFooterStatus();
         }
     });
@@ -992,7 +1159,6 @@ export default function (pi: ExtensionAPI) {
 
     pi.on("session_shutdown", async () => {
         logger.log("[WhatsApp-Pi] Session shutdown detected. Stopping WhatsApp service...");
-        outboundQueueService.stop();
-        await whatsappService.stop();
+        await stopRouter();
     });
 }

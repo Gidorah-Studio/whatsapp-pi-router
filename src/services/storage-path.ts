@@ -19,6 +19,8 @@ export interface StoragePaths {
     recentsPath: string;
     logDir: string;
     logPath: string;
+    connectionEventsPath: string;
+    authQuarantineDir: string;
     mediaDir: string;
     outboundQueueDir: string;
     outboundPendingDir: string;
@@ -37,6 +39,8 @@ export function createStoragePaths(root = getDefaultStorageRoot(), legacyRoot = 
         recentsPath: join(root, 'recents', 'recents.json'),
         logDir: root,
         logPath: join(root, 'whatsapp-pi.log'),
+        connectionEventsPath: join(root, 'connection-events.jsonl'),
+        authQuarantineDir: join(root, 'auth-quarantine'),
         mediaDir: join(root, 'whatsapp-medias'),
         outboundQueueDir: join(root, 'outbound-queue'),
         outboundPendingDir: join(root, 'outbound-queue', 'pending'),

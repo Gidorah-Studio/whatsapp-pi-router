@@ -55,6 +55,28 @@ You can also enable direct-chat allow-all mode in `~/.pi/agent/extensions/whatsa
 
 `allowAllDirectChats` bypasses direct-chat allowlist checks at runtime without deleting the saved allowlist. Set it back to `false` or use the `/whatsapp` toggle to return to explicit allowlist mode. Legacy `"allowAll": true` is still accepted as an alias for direct chats only.
 
+## Connection reliability and recovery
+
+The router records every connection lifecycle transition in a sanitized, structured journal:
+
+```txt
+~/.pi/agent/extensions/whatsapp-pi/connection-events.jsonl
+```
+
+The journal is always enabled, rotates at 5 MiB, and records timestamps, connection state, Baileys status codes, classified reasons, reconnect decisions, retry timing, process metadata, and whether local auth existed. It does not record QR values, credentials, message contents, or contact identities. Open `/whatsapp` → `Connection Diagnostics` to see the current state, credential and instance-lock status, process uptime, last disconnect, next retry, and recent lifecycle events. The operator Pi can inspect the same sanitized data through `get_whatsapp_health`; routed WhatsApp child sessions do not load that tool.
+
+Disconnect handling uses explicit recovery classes:
+
+- transient connection loss (`408`, `428`, `515`) reconnects with exponential backoff;
+- logged-out/rejected sessions (`401`, `400`, `500`, or Bad MAC) enter `reauth-required` and stop retrying stale credentials;
+- connection replacement (`440`) enters `connection-conflict` and preserves credentials;
+- intentional stops are recorded separately from outages;
+- unknown disconnects are logged and retried.
+
+When reauthentication is required, open `/whatsapp` and select `Pair New Device (Reset Stale Credentials)`. The router closes the stale socket, moves its local auth directory into `auth-quarantine/`, creates a fresh auth directory, and starts QR pairing in the same Pi process. No Pi restart or manual file rename is required. Only the three newest quarantined auth directories are retained. `Logoff (Delete Session)` also guarantees local credential deletion even when the remote logout call fails.
+
+An exclusive lock next to each auth directory prevents two Pi processes from using the same WhatsApp credentials. The lock is acquired lazily when a process connects or changes auth, stale locks are recovered, and a live second owner fails with an actionable error instead of replacing the first connection.
+
 ## Speech-to-text for WhatsApp voice notes
 
 Incoming WhatsApp voice/audio messages are transcribed before they are routed to the child Pi session.

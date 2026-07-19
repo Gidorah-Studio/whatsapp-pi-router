@@ -64,6 +64,8 @@ export class MenuHandler {
         const childPiSettingsLabel = t('menu.root.childPiSettings');
         const voiceRepliesLabel = t('menu.root.voiceReplies');
         const logoffDeleteSessionLabel = t('menu.root.logoffDeleteSession');
+        const pairNewDeviceLabel = t('menu.root.pairNewDevice');
+        const diagnosticsLabel = t('menu.root.diagnostics');
         const backLabel = t('menu.root.back');
         const options: string[] = [];
 
@@ -74,10 +76,19 @@ export class MenuHandler {
             options.push(allowAllDirectChatsLabel);
             options.push(disconnectWhatsAppLabel);
         } else {
-            options.push(connectWhatsAppLabel);
+            const freshPairingRequired = status === 'reauth-required' || (status === 'logged-out' && registered);
+            if (freshPairingRequired) {
+                options.push(pairNewDeviceLabel);
+            } else {
+                options.push(connectWhatsAppLabel);
+                if (registered) {
+                    options.push(pairNewDeviceLabel);
+                }
+            }
             options.push(allowAllDirectChatsLabel);
         }
 
+        options.push(diagnosticsLabel);
         options.push(childPiSettingsLabel);
         options.push(voiceRepliesLabel);
 
@@ -100,6 +111,22 @@ export class MenuHandler {
                 });
                 await this.whatsappService.start();
                 ctx.ui.notify(registered ? t('menu.root.reconnectStarted') : t('menu.root.pairingStarted'), 'info');
+                break;
+            case pairNewDeviceLabel: {
+                const confirmed = await ctx.ui.confirm(
+                    t('menu.root.pairNewDeviceTitle'),
+                    t('menu.root.pairNewDeviceConfirm')
+                );
+                if (!confirmed) break;
+                this.whatsappService.setQRCodeCallback((qr) => {
+                    qrcode.generate(qr, { small: true });
+                });
+                await this.whatsappService.resetAndStartPairing('operator-request');
+                ctx.ui.notify(t('menu.root.credentialsResetPairingStarted'), 'info');
+                break;
+            }
+            case diagnosticsLabel:
+                await this.showConnectionDiagnostics(ctx);
                 break;
             case disconnectWhatsAppLabel:
                 if (status !== 'connected') {
@@ -136,6 +163,34 @@ export class MenuHandler {
                 await this.manageRecents(ctx);
                 break;
         }
+    }
+
+    private async showConnectionDiagnostics(ctx: ExtensionCommandContext) {
+        const diagnostics = await this.whatsappService.getDiagnostics();
+        const lastDisconnect = diagnostics.lastDisconnect;
+        const recent = diagnostics.recentEvents.slice(-5).map(event => {
+            const code = event.statusCode === undefined ? '' : ` code=${event.statusCode}`;
+            const reason = event.reason ? ` reason=${event.reason}` : '';
+            return `${event.timestamp} ${event.type} state=${event.state}${code}${reason}`;
+        });
+        const lines = [
+            'WhatsApp Connection Diagnostics',
+            `Status: ${diagnostics.status}`,
+            `Credentials: ${diagnostics.authStatePresent ? 'present' : 'missing'}`,
+            `Instance lock owned: ${diagnostics.instanceLockOwned ? 'yes' : 'no'}`,
+            `Operator action required: ${diagnostics.operatorActionRequired ? 'yes' : 'no'}`,
+            `Connected since: ${diagnostics.connectedSince ?? 'not connected in this process'}`,
+            `Reconnect attempts: ${diagnostics.reconnectAttempts}`,
+            `Next retry: ${diagnostics.nextRetryAt ?? 'none'}`,
+            `Process started: ${diagnostics.processStartedAt}`,
+            `Process uptime: ${diagnostics.processUptimeSeconds}s`,
+            `Last disconnect: ${lastDisconnect
+                ? `${lastDisconnect.timestamp} (${lastDisconnect.classification ?? 'unknown'}, code ${lastDisconnect.statusCode ?? 'unknown'}, ${lastDisconnect.reason ?? 'no reason'})`
+                : 'none recorded'}`,
+            `Event log: ${diagnostics.eventLogPath}`,
+            ...(recent.length > 0 ? ['Recent lifecycle events:', ...recent] : [])
+        ];
+        ctx.ui.notify(lines.join('\n'), 'info');
     }
 
     private async toggleAllowAllDirectChats(ctx: ExtensionCommandContext) {

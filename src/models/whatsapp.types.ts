@@ -1,4 +1,13 @@
-export type SessionStatus = 'logged-out' | 'pairing' | 'connected' | 'disconnected';
+export type SessionStatus =
+    | 'logged-out'
+    | 'connecting'
+    | 'pairing'
+    | 'connected'
+    | 'disconnected'
+    | 'reconnecting'
+    | 'reauth-required'
+    | 'connection-conflict'
+    | 'stopped';
 
 export interface WhatsAppSession {
     id: string;

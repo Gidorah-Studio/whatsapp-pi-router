@@ -1,6 +1,5 @@
 import {
     makeWASocket,
-    DisconnectReason,
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore
 } from 'baileys';
@@ -13,6 +12,12 @@ import { t } from '../i18n.js';
 import { appendFileSync } from 'fs';
 import { createStoragePaths } from './storage-path.js';
 import type { WhatsAppImageMimeType } from './outbound-image.service.js';
+import {
+    ConnectionEventJournal,
+    classifyDisconnect,
+    type ConnectionLifecycleEvent,
+    type NewConnectionLifecycleEvent
+} from './connection-lifecycle.js';
 
 const LOG_FILE = createStoragePaths().logPath;
 function fileLog(msg: string) {
@@ -140,6 +145,21 @@ interface BoomLikeError {
     message?: string;
 }
 
+export interface WhatsAppDiagnostics {
+    status: SessionStatus;
+    authStatePresent: boolean;
+    instanceLockOwned: boolean;
+    operatorActionRequired: boolean;
+    reconnectAttempts: number;
+    nextRetryAt?: string;
+    connectedSince?: string;
+    processStartedAt: string;
+    processUptimeSeconds: number;
+    eventLogPath: string;
+    lastDisconnect?: ConnectionLifecycleEvent;
+    recentEvents: ConnectionLifecycleEvent[];
+}
+
 export class WhatsAppService {
     private static readonly INITIAL_RECONNECT_DELAY_MS = 5_000;
     private static readonly MAX_RECONNECT_DELAY_MS = 120_000;
@@ -163,8 +183,16 @@ export class WhatsAppService {
     private qrWasShown = false;
     private boundGroupJid: string | null = null;
     private groupMetadataCache: Map<string, { id: string; subject: string; participants: Array<{ id: string }> }> = new Map();
+    private nextRetryAt?: string;
+    private connectedSince?: string;
+    private instanceOwnershipCheck: () => boolean = () => true;
+    private acquireInstanceOwnership: () => Promise<void> = async () => {};
+    private readonly processStartedAt = new Date().toISOString();
 
-    constructor(sessionManager: SessionManager) {
+    constructor(
+        sessionManager: SessionManager,
+        private readonly connectionJournal = new ConnectionEventJournal()
+    ) {
         this.sessionManager = sessionManager;
         this.messageSender = new MessageSender(this);
     }
@@ -188,6 +216,53 @@ export class WhatsAppService {
         }
 
         return status;
+    }
+
+    public async recordLifecycleEvent(event: NewConnectionLifecycleEvent): Promise<void> {
+        try {
+            await this.connectionJournal.record(event);
+        } catch (error) {
+            console.error('[WhatsApp-Pi] Failed to record connection lifecycle event:', error);
+        }
+    }
+
+    public async getDiagnostics(): Promise<WhatsAppDiagnostics> {
+        const lifecycleEvents = await this.connectionJournal.readRecent(100);
+        const recentEvents = lifecycleEvents.slice(-12);
+        const lastDisconnect = [...lifecycleEvents].reverse().find(event => event.type === 'connection-close');
+        const status = this.getEffectiveStatus();
+
+        return {
+            status,
+            authStatePresent: await this.sessionManager.isRegistered(),
+            instanceLockOwned: this.instanceOwnershipCheck(),
+            operatorActionRequired: status === 'reauth-required' || status === 'connection-conflict',
+            reconnectAttempts: this.reconnectAttempts,
+            ...(this.nextRetryAt ? { nextRetryAt: this.nextRetryAt } : {}),
+            ...(this.connectedSince ? { connectedSince: this.connectedSince } : {}),
+            processStartedAt: this.processStartedAt,
+            processUptimeSeconds: Math.round(process.uptime()),
+            eventLogPath: this.connectionJournal.getPath(),
+            ...(lastDisconnect ? { lastDisconnect } : {}),
+            recentEvents
+        };
+    }
+
+    public setInstanceOwnershipHandlers(
+        check: () => boolean,
+        acquire: () => Promise<void>
+    ) {
+        this.instanceOwnershipCheck = check;
+        this.acquireInstanceOwnership = acquire;
+    }
+
+    private async ensureInstanceOwnership() {
+        if (!this.instanceOwnershipCheck()) {
+            await this.acquireInstanceOwnership();
+        }
+        if (!this.instanceOwnershipCheck()) {
+            throw new Error('This Pi process does not own the WhatsApp auth lock. Stop the other router instance before connecting or changing credentials.');
+        }
     }
 
     public setIncomingMessageRecorder(callback: (message: IncomingMessage) => void | Promise<void>) {
@@ -384,23 +459,40 @@ export class WhatsAppService {
         return Math.min(delay, WhatsAppService.MAX_RECONNECT_DELAY_MS);
     }
 
-    private scheduleReconnect(options: WhatsAppStartOptions) {
+    private async scheduleReconnect(options: WhatsAppStartOptions) {
         if (this.intentionalStop) return;
         this.isReconnecting = true;
         this.reconnectAttempts++;
         const delay = this.getReconnectDelayMs();
+        this.nextRetryAt = new Date(Date.now() + delay).toISOString();
+        const previousState = this.sessionManager.getStatus();
+        await this.sessionManager.setStatus('reconnecting');
         this.onStatusUpdate?.(t('service.whatsapp.reconnecting'));
+        await this.recordLifecycleEvent({
+            type: 'reconnect-scheduled',
+            state: 'reconnecting',
+            previousState,
+            classification: 'transient',
+            action: 'reconnect',
+            reason: 'retry-with-backoff',
+            reconnectAttempt: this.reconnectAttempts,
+            nextRetryAt: this.nextRetryAt,
+            authStatePresent: await this.sessionManager.isRegistered()
+        });
         this.clearReconnectTimeout();
-        this.reconnectTimeout = setTimeout(async () => {
-            this.isReconnecting = false;
-            if (this.intentionalStop) return;
-            try {
-                await this.start(options);
-            } catch {
-                if (!this.intentionalStop) {
-                    this.scheduleReconnect(options);
+        this.reconnectTimeout = setTimeout(() => {
+            void (async () => {
+                this.isReconnecting = false;
+                this.nextRetryAt = undefined;
+                if (this.intentionalStop) return;
+                try {
+                    await this.start(options);
+                } catch {
+                    if (!this.intentionalStop) {
+                        await this.scheduleReconnect(options);
+                    }
                 }
-            }
+            })();
         }, delay);
     }
 
@@ -535,9 +627,21 @@ export class WhatsAppService {
     }
 
     async start(options: WhatsAppStartOptions = {}) {
+        await this.ensureInstanceOwnership();
         this.intentionalStop = false;
         if (this.isReconnecting) return;
+
+        const previousState = this.sessionManager.getStatus();
+        await this.sessionManager.setStatus('connecting');
         this.onStatusUpdate?.(t('service.whatsapp.connecting'));
+        await this.recordLifecycleEvent({
+            type: 'connection-start',
+            state: 'connecting',
+            previousState,
+            action: 'none',
+            reason: 'socket-start-requested',
+            authStatePresent: await this.sessionManager.isRegistered()
+        });
 
         this.cleanupSocket();
 
@@ -558,11 +662,17 @@ export class WhatsAppService {
             this.registerSocketListeners(socket, options, this.saveCreds ?? (async () => {}));
             socketInitialized = true;
         } catch (error) {
-            if (!this.verboseMode) {
-                console.log = originalConsoleLog;
-                console.warn = originalConsoleWarn;
-                console.error = originalConsoleError;
-            }
+            await this.sessionManager.setStatus('disconnected');
+            await this.recordLifecycleEvent({
+                type: 'connection-start-failed',
+                state: 'disconnected',
+                previousState: 'connecting',
+                classification: 'unknown',
+                action: 'reconnect',
+                reason: 'socket-start-failed',
+                error: this.getErrorMessage(error),
+                authStatePresent: await this.sessionManager.isRegistered()
+            });
             throw error;
         } finally {
             if (!this.verboseMode) {
@@ -578,14 +688,13 @@ export class WhatsAppService {
 
     private async handleConnectionUpdate(update: ConnectionUpdateEvent, options: WhatsAppStartOptions) {
         const { connection, lastDisconnect, qr } = update;
-        const allowPairingOnAuthFailure = options.allowPairingOnAuthFailure ?? true;
 
         if (qr) {
             await this.handlePairingQr(qr);
         }
 
         if (connection === 'close') {
-            await this.handleConnectionClosed(lastDisconnect, allowPairingOnAuthFailure, options);
+            await this.handleConnectionClosed(lastDisconnect, options);
             return;
         }
 
@@ -595,7 +704,16 @@ export class WhatsAppService {
     }
 
     private async handlePairingQr(qr: string) {
+        const previousState = this.sessionManager.getStatus();
         await this.sessionManager.setStatus('pairing');
+        await this.recordLifecycleEvent({
+            type: 'pairing-qr-issued',
+            state: 'pairing',
+            previousState,
+            action: 'none',
+            reason: 'new-pairing-qr',
+            authStatePresent: await this.sessionManager.isRegistered()
+        });
         this.onQRCode?.(qr);
         this.onStatusUpdate?.(t('service.whatsapp.typeToConnect'));
         this.qrWasShown = true;
@@ -606,12 +724,23 @@ export class WhatsAppService {
             console.log(t('service.whatsapp.connectionOpened'));
         }
 
+        const previousState = this.sessionManager.getStatus();
         this.isReconnecting = false;
         this.reconnectAttempts = 0;
+        this.nextRetryAt = undefined;
+        this.connectedSince = new Date().toISOString();
         this.clearReconnectTimeout();
         await this.saveCreds?.();
         await this.sessionManager.markAuthStateAvailable();
         await this.sessionManager.setStatus('connected');
+        await this.recordLifecycleEvent({
+            type: 'connection-open',
+            state: 'connected',
+            previousState,
+            action: 'none',
+            reason: 'socket-opened',
+            authStatePresent: true
+        });
         this.onStatusUpdate?.(t('service.whatsapp.connected'));
 
         if (this.qrWasShown) {
@@ -638,81 +767,73 @@ export class WhatsAppService {
         return this.sessionManager.getOperatorJid();
     }
 
-    private isBadMacError(errorMessage: string): boolean {
-        return errorMessage.includes('Bad MAC');
-    }
-
-    private isAuthRejected(statusCode: number | undefined, errorMessage: string): boolean {
-        return errorMessage.includes('bad-request')
-            || statusCode === 400
-            || statusCode === 401
-            || statusCode === DisconnectReason.loggedOut
-            || statusCode === DisconnectReason.badSession;
-    }
-
     private async handleConnectionClosed(
         lastDisconnect: LastDisconnectLike | undefined,
-        allowPairingOnAuthFailure: boolean,
         options: WhatsAppStartOptions
     ) {
+        const previousState = this.sessionManager.getStatus();
         const statusCode = this.getDisconnectStatusCode(lastDisconnect?.error);
         const errorMessage = this.getErrorMessage(lastDisconnect?.error);
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        const isBadMac = this.isBadMacError(errorMessage);
-        const isAuthRejected = this.isAuthRejected(statusCode, errorMessage);
-        const shouldTreatAsLoggedOut = isBadMac
+        const decision = classifyDisconnect(statusCode, errorMessage, this.intentionalStop);
+        const authStatePresent = await this.sessionManager.isRegistered();
+        const nextState = decision.classification === 'intentional'
+            ? 'stopped'
+            : decision.classification === 'reauth-required'
+                ? 'reauth-required'
+                : decision.classification === 'connection-conflict'
+                    ? 'connection-conflict'
+                    : 'disconnected';
 
-        if (this.intentionalStop) {
+        await this.recordLifecycleEvent({
+            type: 'connection-close',
+            state: nextState,
+            previousState,
+            classification: decision.classification,
+            action: decision.action,
+            statusCode,
+            reason: decision.reason,
+            error: errorMessage,
+            reconnectAttempt: this.reconnectAttempts,
+            authStatePresent,
+            intentional: this.intentionalStop
+        });
+
+        if (decision.classification === 'intentional') {
             return;
         }
 
+        this.connectedSince = undefined;
         if (this.verboseMode) {
-            console.error(t('service.whatsapp.connectionClosed', { statusCode: statusCode ?? 'unknown', shouldReconnect: String(shouldReconnect) }));
+            console.error(t('service.whatsapp.connectionClosed', {
+                statusCode: statusCode ?? 'unknown',
+                shouldReconnect: String(decision.action === 'reconnect')
+            }));
         }
 
-        if (shouldTreatAsLoggedOut) {
-            if (this.verboseMode) {
-                console.error(t('service.whatsapp.sessionRejected', { statusCode: statusCode ?? 'unknown' }));
-            }
-            if (isBadMac) {
-                if (this.verboseMode) {
-					console.error(t('service.whatsapp.badMacDetected'));
-                    console.error(t('service.whatsapp.runClearAuth'));
-                }
-                this.onStatusUpdate?.(t('service.whatsapp.sessionErrorBadMac'));
-            } else if (isAuthRejected && allowPairingOnAuthFailure) {
-                this.onStatusUpdate?.('| WhatsApp: Session Preserved (Reconnect Failed)');
-            }
+        if (decision.classification === 'reauth-required') {
             this.cleanupSocket();
             this.isReconnecting = false;
             this.reconnectAttempts = 0;
-            await this.sessionManager.setStatus('disconnected');
-            if (!isBadMac) {
-                this.onStatusUpdate?.(t('service.whatsapp.disconnected'));
-            }
+            this.nextRetryAt = undefined;
+            await this.sessionManager.setStatus('reauth-required');
+            this.onStatusUpdate?.(t('service.whatsapp.reauthRequired'));
             return;
         }
 
-        if (statusCode === DisconnectReason.connectionReplaced) {
-            if (this.verboseMode) {
-                console.error(t('service.whatsapp.connectionReplaced'));
-            }
+        if (decision.classification === 'connection-conflict') {
             this.cleanupSocket();
             this.isReconnecting = false;
             this.reconnectAttempts = 0;
-            await this.sessionManager.setStatus('disconnected');
+            this.nextRetryAt = undefined;
+            await this.sessionManager.setStatus('connection-conflict');
             this.onStatusUpdate?.(t('service.whatsapp.conflict'));
             return;
         }
 
-        if (shouldReconnect && !this.isReconnecting) {
+        if (!this.isReconnecting) {
             await this.saveCreds?.();
             this.cleanupSocket();
-            this.scheduleReconnect(options);
-        } else if (!shouldReconnect) {
-            this.reconnectAttempts = 0;
-            await this.sessionManager.setStatus('logged-out');
-            this.onStatusUpdate?.(t('service.whatsapp.disconnected'));
+            await this.scheduleReconnect(options);
         }
     }
 
@@ -1036,13 +1157,76 @@ export class WhatsAppService {
         }
     }
 
-    async logout() {
+    async resetAndStartPairing(reason = 'operator-request'): Promise<{ quarantinePath?: string }> {
+        await this.ensureInstanceOwnership();
+        const previousState = this.sessionManager.getStatus();
         this.intentionalStop = true;
-        await this.socket?.logout();
-        await this.sessionManager.deleteAuthState();
+        this.isReconnecting = false;
+        this.reconnectAttempts = 0;
+        this.nextRetryAt = undefined;
+        this.connectedSince = undefined;
+        this.cleanupSocket();
+
+        const quarantinePath = await this.sessionManager.quarantineAuthState(reason);
+        await this.recordLifecycleEvent({
+            type: 'auth-state-quarantined',
+            state: 'reauth-required',
+            previousState,
+            action: 'pair-new-device',
+            reason,
+            authStatePresent: false,
+            intentional: true
+        });
+
+        this.intentionalStop = false;
+        await this.start({ allowPairingOnAuthFailure: true });
+        return { ...(quarantinePath ? { quarantinePath } : {}) };
+    }
+
+    async logout() {
+        await this.ensureInstanceOwnership();
+        const previousState = this.sessionManager.getStatus();
+        this.intentionalStop = true;
+        let remoteLogoutError: string | undefined;
+        let localDeleteError: string | undefined;
+
+        try {
+            await this.socket?.logout();
+        } catch (error) {
+            remoteLogoutError = this.getErrorMessage(error);
+        } finally {
+            this.cleanupSocket();
+            this.isReconnecting = false;
+            this.reconnectAttempts = 0;
+            this.nextRetryAt = undefined;
+            this.connectedSince = undefined;
+            try {
+                await this.sessionManager.deleteAuthState();
+            } catch (error) {
+                localDeleteError = this.getErrorMessage(error);
+            }
+        }
+
+        await this.recordLifecycleEvent({
+            type: localDeleteError ? 'auth-state-delete-failed' : 'auth-state-deleted',
+            state: localDeleteError ? 'reauth-required' : 'logged-out',
+            previousState,
+            classification: localDeleteError ? 'unknown' : 'intentional',
+            action: localDeleteError ? 'pair-new-device' : 'none',
+            reason: localDeleteError ? 'local-credential-delete-failed' : 'operator-logout',
+            ...((localDeleteError || remoteLogoutError) ? { error: localDeleteError || remoteLogoutError } : {}),
+            authStatePresent: localDeleteError ? await this.sessionManager.isRegistered() : false,
+            intentional: true
+        });
+
+        if (localDeleteError) {
+            throw new Error(`Failed to delete local WhatsApp credentials: ${localDeleteError}`);
+        }
+        this.onStatusUpdate?.(t('service.whatsapp.loggedOut'));
     }
 
     async stop() {
+        const previousState = this.sessionManager.getStatus();
         this.intentionalStop = true;
         try {
             await this.saveCreds?.();
@@ -1054,7 +1238,20 @@ export class WhatsAppService {
 
         this.cleanupSocket();
         this.isReconnecting = false;
-        await this.sessionManager.setStatus('disconnected');
+        this.reconnectAttempts = 0;
+        this.nextRetryAt = undefined;
+        this.connectedSince = undefined;
+        await this.sessionManager.setStatus('stopped');
+        await this.recordLifecycleEvent({
+            type: 'connection-stop',
+            state: 'stopped',
+            previousState,
+            classification: 'intentional',
+            action: 'none',
+            reason: 'extension-stop',
+            authStatePresent: await this.sessionManager.isRegistered(),
+            intentional: true
+        });
         this.onStatusUpdate?.(t('service.whatsapp.disconnected'));
     }
 }
