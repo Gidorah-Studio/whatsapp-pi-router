@@ -528,8 +528,9 @@ export class WhatsAppService {
 
     private registerSocketListeners(socket: WhatsAppSocketLike, options: WhatsAppStartOptions, saveCreds: () => Promise<void>) {
         socket.ev.on('creds.update', async () => {
+            // A creds file also exists during QR pairing with registered=false.
+            // Only connection-open marks the session as registered.
             await saveCreds();
-            await this.sessionManager.markAuthStateAvailable();
         });
 
         socket.ev.on('connection.update', async (update) => {

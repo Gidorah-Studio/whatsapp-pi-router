@@ -194,7 +194,6 @@ export class SessionManager {
     public async saveConfig() {
         const tempPath = `${this.configPath}.${process.pid}.${Date.now()}.tmp`;
         try {
-            this.hasAuthState = await this.hasCredentialsFile();
             const config = {
                 allowList: this.allowList,
                 allowedGroups: this.allowedGroups,
@@ -451,14 +450,21 @@ export class SessionManager {
     }
 
     public async isRegistered(): Promise<boolean> {
+        if (this.status === 'connected') {
+            if (!this.hasAuthState) {
+                this.hasAuthState = true;
+                await this.saveConfig();
+            }
+            return true;
+        }
+
         await this.syncAuthStateFromDisk();
         return this.hasAuthState;
     }
 
     async markAuthStateAvailable() {
-        const registered = await this.hasCredentialsFile();
-        if (registered !== this.hasAuthState) {
-            this.hasAuthState = registered;
+        if (!this.hasAuthState) {
+            this.hasAuthState = true;
             await this.saveConfig();
         }
     }
@@ -513,13 +519,8 @@ export class SessionManager {
 
     private async syncAuthStateFromDisk() {
         const nextHasAuthState = await this.hasCredentialsFile();
-        const nextStatus = nextHasAuthState || this.status !== 'connected'
-            ? this.status
-            : 'disconnected';
-
-        if (nextHasAuthState !== this.hasAuthState || nextStatus !== this.status) {
+        if (nextHasAuthState !== this.hasAuthState) {
             this.hasAuthState = nextHasAuthState;
-            this.status = nextStatus;
             await this.saveConfig();
         }
     }

@@ -34,6 +34,28 @@ test('quarantines stale auth and immediately prepares an empty pairing directory
     }
 });
 
+test('a live connected session is not downgraded by an incomplete creds file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'whatsapp-auth-live-'));
+    const manager = new SessionManager(root, join(root, 'legacy-missing'));
+
+    try {
+        await manager.ensureInitialized();
+        await writeFile(join(manager.getAuthStateDir(), 'creds.json'), '{"registered":false}');
+        await manager.setStatus('connected');
+
+        assert.equal(await manager.isRegistered(), true);
+        assert.equal(manager.getStatus(), 'connected');
+        const config = JSON.parse(await readFile(join(root, 'config.json'), 'utf8')) as {
+            status: string;
+            hasAuthState: boolean;
+        };
+        assert.equal(config.status, 'connected');
+        assert.equal(config.hasAuthState, true);
+    } finally {
+        await rm(root, { recursive: true, force: true });
+    }
+});
+
 test('an unpaired creds file is not treated as a registered WhatsApp session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'whatsapp-auth-unpaired-'));
     const manager = new SessionManager(root, join(root, 'legacy-missing'));
