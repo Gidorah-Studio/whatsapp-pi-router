@@ -1,7 +1,7 @@
 import { useMultiFileAuthState } from 'baileys';
 import { basename, join } from 'path';
 import { readFile, writeFile, mkdir, rm, rename, readdir } from 'fs/promises';
-import { SessionStatus } from '../models/whatsapp.types.js';
+import { SessionStatus, type GroupReplyMode } from '../models/whatsapp.types.js';
 import { t } from '../i18n.js';
 import {
     getDefaultLegacyStorageRoot,
@@ -54,6 +54,7 @@ export class SessionManager {
     private ignoredNumbers: Contact[] = [];
     private allowAllDirectChats = false;
     private allowAllGroups = false;
+    private groupReplyMode: GroupReplyMode = 'all';
     private hasAuthState = false;
     private openaiKey: string = '';
     private visionModel: string = 'gpt-4o';
@@ -260,6 +261,14 @@ export class SessionManager {
 
     getAllowAllGroups(): boolean {
         return this.allowAllGroups;
+    }
+
+    setGroupReplyMode(mode: GroupReplyMode) {
+        this.groupReplyMode = mode;
+    }
+
+    getGroupReplyMode(): GroupReplyMode {
+        return this.groupReplyMode;
     }
 
     getAllowList(): Contact[] {

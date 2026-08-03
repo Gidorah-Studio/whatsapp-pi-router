@@ -483,11 +483,15 @@ export default function (pi: ExtensionAPI) {
         const routerAllowConfig = await loadRouterAllowConfig();
         sessionManager.setAllowAllDirectChats(routerAllowConfig.allowAllDirectChats);
         sessionManager.setAllowAllGroups(routerAllowConfig.allowAllGroups);
+        sessionManager.setGroupReplyMode(routerAllowConfig.groupReplyMode);
         if (routerAllowConfig.allowAllDirectChats) {
             logger.log('[WhatsApp-Pi] Router allow-all direct chats mode enabled; inbound direct chats will be routed without allowlist checks. Groups still require explicit allow unless group allow-all is enabled.');
         }
         if (routerAllowConfig.allowAllGroups) {
             logger.log('[WhatsApp-Pi] Router allow-all groups mode enabled; inbound group conversations will be routed without allowlist checks.');
+        }
+        if (routerAllowConfig.groupReplyMode === 'mentions') {
+            logger.log('[WhatsApp-Pi] Group mention-only mode enabled; allowed group messages will route only when the connected WhatsApp agent is explicitly mentioned.');
         }
         for (const number of routerAllowConfig.allow) {
             await sessionManager.addNumber(number);

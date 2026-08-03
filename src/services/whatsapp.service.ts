@@ -1,7 +1,8 @@
 import {
     makeWASocket,
     fetchLatestBaileysVersion,
-    makeCacheableSignalKeyStore
+    makeCacheableSignalKeyStore,
+    extractMessageContent
 } from 'baileys';
 import P from 'pino';
 import { SessionManager } from './session.manager.js';
@@ -407,22 +408,105 @@ export class WhatsAppService {
         return domain ? `${normalizedLocal}@${domain}` : normalizedLocal;
     }
 
-    private normalizeJidIdentity(jid: string): string {
-        return this.normalizeJidForComparison(jid).split('@')[0];
-    }
-
     private getAgentJidCandidates(): string[] {
         const user = this.socket?.user;
-        const rawJids = [user?.id, user?.lid].filter((jid): jid is string => Boolean(jid));
+        const rawJids = [
+            user?.id,
+            user?.lid,
+            this.sessionManager.getOperatorJid()
+        ].filter((jid): jid is string => Boolean(jid));
         const candidates = new Set<string>();
 
         for (const jid of rawJids) {
-            const normalized = this.normalizeJidForComparison(jid);
-            candidates.add(normalized);
-            candidates.add(this.normalizeJidIdentity(jid));
+            candidates.add(this.normalizeJidForComparison(jid));
         }
 
         return [...candidates];
+    }
+
+    private getMentionedJids(message: IncomingMessageContent | undefined): string[] {
+        let content: any = message;
+
+        for (let depth = 0; depth < 5 && content; depth++) {
+            const extracted = extractMessageContent(content) ?? content;
+            const nested = extracted?.ephemeralMessage?.message
+                || extracted?.viewOnceMessage?.message
+                || extracted?.viewOnceMessageV2?.message
+                || extracted?.viewOnceMessageV2Extension?.message;
+            if (nested) {
+                content = nested;
+                continue;
+            }
+            content = extracted;
+            break;
+        }
+
+        if (!content || typeof content !== 'object') {
+            return [];
+        }
+
+        const mentioned = new Set<string>();
+        for (const value of [content, ...Object.values(content)]) {
+            if (!value || typeof value !== 'object') continue;
+            const contextInfo = (value as IncomingMessageWithContext).contextInfo;
+            for (const jid of contextInfo?.mentionedJid ?? []) {
+                if (typeof jid === 'string' && jid.trim()) {
+                    mentioned.add(jid);
+                }
+            }
+        }
+        return [...mentioned];
+    }
+
+    private addJidCandidate(candidates: Set<string>, jid: string | null | undefined) {
+        if (!jid) return;
+        candidates.add(this.normalizeJidForComparison(jid));
+    }
+
+    private async getAgentMentionJidCandidates(): Promise<Set<string>> {
+        const candidates = new Set(this.getAgentJidCandidates());
+        const mapping = this.socket?.signalRepository?.lidMapping;
+        if (!mapping) {
+            return candidates;
+        }
+
+        const rawJids = [
+            this.socket?.user?.id,
+            this.socket?.user?.lid,
+            this.sessionManager.getOperatorJid()
+        ].filter((jid): jid is string => Boolean(jid));
+
+        for (const rawJid of rawJids) {
+            const jid = this.normalizeRecipientJid(rawJid);
+            try {
+                if (this.isDirectPhoneJid(jid)) {
+                    this.addJidCandidate(candidates, await mapping.getLIDForPN(jid));
+                } else if (this.isLidJid(jid)) {
+                    this.addJidCandidate(candidates, await mapping.getPNForLID(jid));
+                }
+            } catch (error) {
+                if (this.isVerbose()) {
+                    console.error('[WhatsApp-Pi] Failed to resolve agent mention identity:', error);
+                }
+            }
+        }
+
+        return candidates;
+    }
+
+    private async isAgentMentioned(message: IncomingMessageContent | undefined): Promise<boolean> {
+        const agentJids = await this.getAgentMentionJidCandidates();
+        if (agentJids.size === 0) {
+            return false;
+        }
+
+        return this.getMentionedJids(message).some((jid) =>
+            agentJids.has(this.normalizeJidForComparison(jid))
+        );
+    }
+
+    private async shouldRouteGroupMessage(message: IncomingMessageContent | undefined): Promise<boolean> {
+        return this.sessionManager.getGroupReplyMode() === 'all' || await this.isAgentMentioned(message);
     }
 
     private getDisconnectStatusCode(error: unknown): number | undefined {
@@ -912,6 +996,16 @@ export class WhatsAppService {
                 return;
             }
 
+            if (!await this.shouldRouteGroupMessage(message.message)) {
+                if (this.isVerbose()) {
+                    console.log(t('service.whatsapp.ignoredGroupWithoutMention', { groupJid: remoteJid }));
+                }
+                if (this.shouldRecordIgnoredMessages()) {
+                    void this.recordIncomingMessage(message, remoteJid, text);
+                }
+                return;
+            }
+
             void this.recordIncomingMessage(message, remoteJid, text);
             this.lastRemoteJid = remoteJid;
             this.onMessage?.(payload);
@@ -926,6 +1020,16 @@ export class WhatsAppService {
                 void this.recordIncomingMessage(message, remoteJid, text);
             }
             await this.sessionManager.trackIgnoredNumber(senderJid, pushName);
+            return;
+        }
+
+        if (isGroup && !await this.shouldRouteGroupMessage(message.message)) {
+            if (this.isVerbose()) {
+                console.log(t('service.whatsapp.ignoredGroupWithoutMention', { groupJid: remoteJid }));
+            }
+            if (this.shouldRecordIgnoredMessages()) {
+                void this.recordIncomingMessage(message, remoteJid, text);
+            }
             return;
         }
 

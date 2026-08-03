@@ -61,6 +61,9 @@ export class MenuHandler {
         const allowAllDirectChatsLabel = t(this.sessionManager.getAllowAllDirectChats()
             ? 'menu.root.allowAllDirectChatsOn'
             : 'menu.root.allowAllDirectChatsOff');
+        const groupReplyModeLabel = t(this.sessionManager.getGroupReplyMode() === 'mentions'
+            ? 'menu.root.groupRepliesMentions'
+            : 'menu.root.groupRepliesAll');
         const childPiSettingsLabel = t('menu.root.childPiSettings');
         const voiceRepliesLabel = t('menu.root.voiceReplies');
         const logoffDeleteSessionLabel = t('menu.root.logoffDeleteSession');
@@ -74,6 +77,7 @@ export class MenuHandler {
             options.push(allowedContactsLabel);
             options.push(allowedGroupsLabel);
             options.push(allowAllDirectChatsLabel);
+            options.push(groupReplyModeLabel);
             options.push(disconnectWhatsAppLabel);
         } else {
             const freshPairingRequired = status === 'reauth-required' || (status === 'logged-out' && registered);
@@ -86,6 +90,7 @@ export class MenuHandler {
                 }
             }
             options.push(allowAllDirectChatsLabel);
+            options.push(groupReplyModeLabel);
         }
 
         options.push(diagnosticsLabel);
@@ -153,6 +158,9 @@ export class MenuHandler {
             case allowAllDirectChatsLabel:
                 await this.toggleAllowAllDirectChats(ctx);
                 break;
+            case groupReplyModeLabel:
+                await this.toggleGroupReplyMode(ctx);
+                break;
             case childPiSettingsLabel:
                 await this.manageChildPiSettings(ctx);
                 break;
@@ -215,6 +223,35 @@ export class MenuHandler {
                 : t('menu.root.allowAllDirectChatsDisabled'), nextAllowAll ? 'warning' : 'info');
         } catch (error) {
             ctx.ui.notify(t('menu.root.allowAllDirectChatsSaveFailure', {
+                error: error instanceof Error ? error.message : String(error)
+            }), 'error');
+        }
+
+        await this.handleCommand(ctx);
+    }
+
+    private async toggleGroupReplyMode(ctx: ExtensionCommandContext) {
+        const nextMode = this.sessionManager.getGroupReplyMode() === 'mentions' ? 'all' : 'mentions';
+
+        if (nextMode === 'all') {
+            const confirmed = await ctx.ui.confirm(
+                t('menu.root.groupRepliesAllConfirmTitle'),
+                t('menu.root.groupRepliesAllConfirmMessage')
+            );
+            if (!confirmed) {
+                await this.handleCommand(ctx);
+                return;
+            }
+        }
+
+        try {
+            await updateRouterAllowFileConfig({ groupReplyMode: nextMode });
+            this.sessionManager.setGroupReplyMode(nextMode);
+            ctx.ui.notify(nextMode === 'mentions'
+                ? t('menu.root.groupRepliesMentionsEnabled')
+                : t('menu.root.groupRepliesAllEnabled'), nextMode === 'mentions' ? 'info' : 'warning');
+        } catch (error) {
+            ctx.ui.notify(t('menu.root.groupRepliesSaveFailure', {
                 error: error instanceof Error ? error.message : String(error)
             }), 'error');
         }

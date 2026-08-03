@@ -43,17 +43,20 @@ The router preserves the original allowlist/group controls from `whatsapp-pi` by
 
 Use `/whatsapp` → `Allow All Direct Chats: Off/On` to let every inbound direct chat route to Pi. Groups still require explicit allowlist entries by default.
 
-You can also enable direct-chat allow-all mode in `~/.pi/agent/extensions/whatsapp-pi/router-allow.json`:
+For groups, use `/whatsapp` → `Group Replies: All Messages/Mentions Only`. In **Mentions Only** mode, an allowed group message is routed to Pi only when WhatsApp's structured `mentionedJid` metadata explicitly identifies the connected agent's phone JID or LID. Direct chats are unaffected, and enabling mention-only mode does not grant access to groups that are not otherwise allowed. Ordinary group messages are ignored without starting a child Pi turn.
+
+You can also configure these routing controls in `~/.pi/agent/extensions/whatsapp-pi/router-allow.json`:
 
 ```json
 {
   "allowAllDirectChats": true,
   "allowAllGroups": false,
+  "groupReplyMode": "mentions",
   "allow": []
 }
 ```
 
-`allowAllDirectChats` bypasses direct-chat allowlist checks at runtime without deleting the saved allowlist. Set it back to `false` or use the `/whatsapp` toggle to return to explicit allowlist mode. Legacy `"allowAll": true` is still accepted as an alias for direct chats only.
+`groupReplyMode` accepts `"all"` (the backwards-compatible default) or `"mentions"`. Mention detection uses WhatsApp metadata rather than matching visible `@name` text. `allowAllDirectChats` bypasses direct-chat allowlist checks at runtime without deleting the saved allowlist. Set it back to `false` or use the `/whatsapp` toggle to return to explicit allowlist mode. Legacy `"allowAll": true` is still accepted as an alias for direct chats only.
 
 ## Connection reliability and recovery
 

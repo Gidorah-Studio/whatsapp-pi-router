@@ -9,6 +9,8 @@ export type SessionStatus =
     | 'connection-conflict'
     | 'stopped';
 
+export type GroupReplyMode = 'all' | 'mentions';
+
 export interface WhatsAppSession {
     id: string;
     status: SessionStatus;

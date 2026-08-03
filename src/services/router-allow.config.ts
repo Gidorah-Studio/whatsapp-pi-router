@@ -1,16 +1,19 @@
 import { mkdir, readFile, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { createStoragePaths } from './storage-path.js';
+import type { GroupReplyMode } from '../models/whatsapp.types.js';
 
 export interface RouterAllowConfig {
     allowAllDirectChats: boolean;
     allowAllGroups: boolean;
+    groupReplyMode: GroupReplyMode;
     allow: string[];
 }
 
 const defaultRouterAllowConfig = (): RouterAllowConfig => ({
     allowAllDirectChats: false,
     allowAllGroups: false,
+    groupReplyMode: 'all',
     allow: []
 });
 
@@ -21,6 +24,12 @@ export const isTruthyConfigValue = (value: unknown): boolean => {
     return ['1', 'true', 'yes', 'on', '*', 'all'].includes(value.trim().toLowerCase());
 };
 
+export const normalizeGroupReplyMode = (value: unknown): GroupReplyMode | undefined => {
+    if (typeof value !== 'string') return undefined;
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'all' || normalized === 'mentions' ? normalized : undefined;
+};
+
 export function getRouterAllowConfigPath(): string {
     return join(createStoragePaths().root, 'router-allow.json');
 }
@@ -29,7 +38,7 @@ const normalizeAllowValues = (values: unknown[]): string[] => values
     .map((value) => typeof value === 'string' ? value.trim() : '')
     .filter(Boolean);
 
-const parseRouterAllowConfig = (raw: string): RouterAllowConfig => {
+export const parseRouterAllowConfig = (raw: string): RouterAllowConfig => {
     const parsed = JSON.parse(raw) as unknown;
 
     if (Array.isArray(parsed)) {
@@ -49,6 +58,7 @@ const parseRouterAllowConfig = (raw: string): RouterAllowConfig => {
         allowAllDirect?: unknown;
         allowAllDirectChats?: unknown;
         allowAllGroups?: unknown;
+        groupReplyMode?: unknown;
     };
 
     const allowAllDirectChatsValue = config.allowAllDirectChats ?? config.allowAllDirect ?? config.allowAll;
@@ -56,6 +66,7 @@ const parseRouterAllowConfig = (raw: string): RouterAllowConfig => {
     return {
         allowAllDirectChats: isTruthyConfigValue(allowAllDirectChatsValue),
         allowAllGroups: isTruthyConfigValue(config.allowAllGroups),
+        groupReplyMode: normalizeGroupReplyMode(config.groupReplyMode) ?? 'all',
         allow: Array.isArray(config.allow) ? normalizeAllowValues(config.allow) : []
     };
 };
@@ -82,6 +93,7 @@ export async function loadRouterAllowConfig(): Promise<RouterAllowConfig> {
     return {
         allowAllDirectChats: envAllowAllDirectChats || fromFile.allowAllDirectChats,
         allowAllGroups: envAllowAllGroups || fromFile.allowAllGroups,
+        groupReplyMode: fromFile.groupReplyMode,
         allow: [...fromEnv, ...fromFile.allow]
     };
 }
@@ -92,11 +104,12 @@ export async function saveRouterAllowFileConfig(config: RouterAllowConfig): Prom
     await writeFile(getRouterAllowConfigPath(), JSON.stringify({
         allowAllDirectChats: config.allowAllDirectChats,
         allowAllGroups: config.allowAllGroups,
+        groupReplyMode: config.groupReplyMode,
         allow: config.allow
     }, null, 2));
 }
 
-export async function updateRouterAllowFileConfig(patch: Partial<Pick<RouterAllowConfig, 'allowAllDirectChats' | 'allowAllGroups'>>): Promise<RouterAllowConfig> {
+export async function updateRouterAllowFileConfig(patch: Partial<Pick<RouterAllowConfig, 'allowAllDirectChats' | 'allowAllGroups' | 'groupReplyMode'>>): Promise<RouterAllowConfig> {
     const current = await loadRouterAllowFileConfig();
     const next = { ...current, ...patch };
     await saveRouterAllowFileConfig(next);
