@@ -9,12 +9,14 @@ import type {
 import { SessionManager } from './session.manager.js';
 
 const MAX_RECENT_CONVERSATIONS = 500;
-const MAX_MESSAGES_PER_CONVERSATION = 20;
+export const MAX_MESSAGES_PER_CONVERSATION = 200;
 
 export interface RecentsMessageInput {
     messageId: string;
     senderNumber: string;
     senderName?: string;
+    participantJid?: string;
+    participantName?: string;
     text: string;
     direction: MessageDirection;
     timestamp: number;
@@ -90,6 +92,10 @@ export class RecentsService {
             typeof message === 'object' &&
             typeof (message as RecentConversationMessage).messageId === 'string' &&
             typeof (message as RecentConversationMessage).senderNumber === 'string' &&
+            ((message as RecentConversationMessage).participantJid === undefined ||
+                typeof (message as RecentConversationMessage).participantJid === 'string') &&
+            ((message as RecentConversationMessage).participantName === undefined ||
+                typeof (message as RecentConversationMessage).participantName === 'string') &&
             typeof (message as RecentConversationMessage).text === 'string' &&
             (message as RecentConversationMessage).text.trim().length > 0 &&
             ((message as RecentConversationMessage).direction === 'incoming' || (message as RecentConversationMessage).direction === 'outgoing') &&
@@ -180,9 +186,13 @@ export class RecentsService {
         if (!normalizedText) return;
 
         const existing = this.store.messagesBySender[senderNumber] ?? [];
+        const participantJid = input.participantJid?.trim() || undefined;
+        const participantName = input.participantName?.trim() || undefined;
         const nextMessage: RecentConversationMessage = {
             messageId: input.messageId,
             senderNumber,
+            ...(participantJid ? { participantJid } : {}),
+            ...(participantName ? { participantName } : {}),
             text: normalizedText,
             direction: input.direction,
             timestamp: normalizedTimestamp

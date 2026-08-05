@@ -1034,6 +1034,9 @@ export class MenuHandler {
                     messageId: result.messageId ?? `${Date.now()}`,
                     senderNumber,
                     senderName,
+                    ...(SessionManager.isGroupJid(senderNumber) && this.whatsappService.getOperatorJid()
+                        ? { participantJid: this.whatsappService.getOperatorJid(), participantName: 'Pi' }
+                        : {}),
                     text: messageText,
                     direction: 'outgoing',
                     timestamp: Date.now()

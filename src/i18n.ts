@@ -272,7 +272,7 @@ const fallback = {
     "tool.listConversations.label": "List WhatsApp Conversations",
     "tool.listConversations.description": "List recent WhatsApp conversations from the local recents store (sender number, optional name, last message preview, direction, timestamp, allowed flag). Read-only.",
     "tool.getHistory.label": "Get WhatsApp Conversation History",
-    "tool.getHistory.description": "Get the most recent messages exchanged with a given WhatsApp sender from the local recents store. Accepts a phone number (+E164 or raw digits) or a JID. Read-only.",
+    "tool.getHistory.description": "Get the most recent messages exchanged with a given WhatsApp sender from the local recents store. Group messages include participantJid and optional participantName when recorded. Accepts a phone number (+E164 or raw digits) or a JID. Read-only.",
     "tool.checkNew.label": "Check WhatsApp New Messages",
     "tool.checkNew.description": "List recent WhatsApp conversations whose most recent message is incoming (i.e. waiting for a reply). Optionally filter by a `sinceTimestamp` (ms epoch). Read-only.",
     "tool.error.notInitialized": "WhatsApp-Pi recents store not initialized",

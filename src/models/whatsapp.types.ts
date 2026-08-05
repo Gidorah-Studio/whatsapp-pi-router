@@ -25,6 +25,8 @@ export interface IncomingMessage {
     id: string;
     remoteJid: string;
     pushName?: string;
+    participantJid?: string;
+    participantName?: string;
     text?: string;
     timestamp: number;
 }
@@ -70,6 +72,8 @@ export type MessageDirection = 'incoming' | 'outgoing';
 export interface RecentConversationMessage {
     messageId: string;
     senderNumber: string;
+    participantJid?: string;
+    participantName?: string;
     text: string;
     direction: MessageDirection;
     timestamp: number;

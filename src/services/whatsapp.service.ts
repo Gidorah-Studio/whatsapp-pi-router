@@ -849,7 +849,10 @@ export class WhatsAppService {
     }
 
     public getOperatorJid(): string {
-        return this.sessionManager.getOperatorJid();
+        const liveJid = this.socket?.user?.id || this.socket?.user?.lid;
+        return liveJid
+            ? this.normalizeJidForComparison(liveJid)
+            : this.sessionManager.getOperatorJid();
     }
 
     private async handleConnectionClosed(
@@ -940,10 +943,20 @@ export class WhatsAppService {
     }
 
     private async recordIncomingMessage(message: IncomingMessageLike, remoteJid: string, text: string) {
+        const isGroup = remoteJid.endsWith('@g.us');
+        const rawParticipantJid = isGroup
+            ? message.key.participantAlt || message.key.participant
+            : undefined;
+        const participantJid = rawParticipantJid
+            ? this.normalizeRecipientJid(rawParticipantJid)
+            : undefined;
+
         void Promise.resolve(this.onIncomingMessageRecorded?.({
             id: message.key.id ?? remoteJid,
             remoteJid,
             pushName: message.pushName || undefined,
+            ...(participantJid ? { participantJid } : {}),
+            ...(isGroup && message.pushName ? { participantName: message.pushName } : {}),
             text,
             timestamp: this.getIncomingTimestamp(message.messageTimestamp)
         })).catch(error => {
@@ -1000,9 +1013,7 @@ export class WhatsAppService {
                 if (this.isVerbose()) {
                     console.log(t('service.whatsapp.ignoredGroupWithoutMention', { groupJid: remoteJid }));
                 }
-                if (this.shouldRecordIgnoredMessages()) {
-                    void this.recordIncomingMessage(message, remoteJid, text);
-                }
+                void this.recordIncomingMessage(message, remoteJid, text);
                 return;
             }
 
@@ -1027,9 +1038,7 @@ export class WhatsAppService {
             if (this.isVerbose()) {
                 console.log(t('service.whatsapp.ignoredGroupWithoutMention', { groupJid: remoteJid }));
             }
-            if (this.shouldRecordIgnoredMessages()) {
-                void this.recordIncomingMessage(message, remoteJid, text);
-            }
+            void this.recordIncomingMessage(message, remoteJid, text);
             return;
         }
 

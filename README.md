@@ -43,7 +43,9 @@ The router preserves the original allowlist/group controls from `whatsapp-pi` by
 
 Use `/whatsapp` → `Allow All Direct Chats: Off/On` to let every inbound direct chat route to Pi. Groups still require explicit allowlist entries by default.
 
-For groups, use `/whatsapp` → `Group Replies: All Messages/Mentions Only`. In **Mentions Only** mode, an allowed group message is routed to Pi only when WhatsApp's structured `mentionedJid` metadata explicitly identifies the connected agent's phone JID or LID. Direct chats are unaffected, and enabling mention-only mode does not grant access to groups that are not otherwise allowed. Ordinary group messages are ignored without starting a child Pi turn.
+For groups, use `/whatsapp` → `Group Replies: All Messages/Mentions Only`. In **Mentions Only** mode, an allowed group message is routed to Pi only when WhatsApp's structured `mentionedJid` metadata explicitly identifies the connected agent's phone JID or LID. Direct chats are unaffected, and enabling mention-only mode does not grant access to groups that are not otherwise allowed. Ordinary allowed-group messages are saved to the local recents history but do not start a child Pi turn.
+
+New incoming group-history records include `participantJid` for the actual sender and `participantName` when WhatsApp supplies a display name. Use `participantJid`—not the user-controlled display name—for exact attribution. Existing records created before this field was added remain readable but cannot be reliably backfilled. The recents store retains the latest 200 messages per conversation; `get_wa_conversation_history` returns up to all 200 by default.
 
 You can also configure these routing controls in `~/.pi/agent/extensions/whatsapp-pi/router-allow.json`:
 

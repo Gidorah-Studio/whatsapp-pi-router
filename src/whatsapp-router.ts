@@ -8,7 +8,7 @@ import { Type } from "@sinclair/typebox";
 import { SessionManager } from './services/session.manager.js';
 import { WhatsAppService } from './services/whatsapp.service.js';
 import { MenuHandler } from './ui/menu.handler.js';
-import { RecentsService } from './services/recents.service.js';
+import { MAX_MESSAGES_PER_CONVERSATION, RecentsService } from './services/recents.service.js';
 import { AudioService } from './services/audio.service.js';
 import { extractIncomingText } from './services/incoming-message.resolver.js';
 import { IncomingMediaService } from './services/incoming-media.service.js';
@@ -510,6 +510,8 @@ export default function (pi: ExtensionAPI) {
                 messageId: message.id,
                 senderNumber,
                 senderName: message.pushName,
+                ...(isGroup && message.participantJid ? { participantJid: message.participantJid } : {}),
+                ...(isGroup && message.participantName ? { participantName: message.participantName } : {}),
                 text: message.text || '',
                 direction: 'incoming',
                 timestamp: message.timestamp
@@ -567,6 +569,14 @@ export default function (pi: ExtensionAPI) {
     let toolSentToJid: string | null = null;
 
     const toRecentSenderNumber = (recipientJid: string): string => toConversationId(recipientJid);
+    const getOutgoingGroupParticipant = (conversationId: string) => {
+        if (!SessionManager.isGroupJid(conversationId)) return {};
+        const participantJid = whatsappService.getOperatorJid();
+        return {
+            ...(participantJid ? { participantJid } : {}),
+            participantName: 'Pi'
+        };
+    };
 
     const sendRoutedReply = async (params: {
         replyJid: string;
@@ -595,6 +605,7 @@ export default function (pi: ExtensionAPI) {
                             messageId: imageResult.messageId ?? `pi-router-image-${Date.now()}`,
                             senderNumber: params.conversationId,
                             senderName: 'Pi',
+                            ...getOutgoingGroupParticipant(params.conversationId),
                             text: params.image.caption || '[Image]',
                             direction: 'outgoing',
                             timestamp: Date.now(),
@@ -621,6 +632,7 @@ export default function (pi: ExtensionAPI) {
                         messageId: voiceResult.messageId ?? `pi-router-voice-${Date.now()}`,
                         senderNumber: params.conversationId,
                         senderName: 'Pi',
+                        ...getOutgoingGroupParticipant(params.conversationId),
                         text,
                         direction: 'outgoing',
                         timestamp: Date.now(),
@@ -650,6 +662,7 @@ export default function (pi: ExtensionAPI) {
             messageId: textResult.messageId ?? `pi-router-${Date.now()}`,
             senderNumber: params.conversationId,
             senderName: 'Pi',
+            ...getOutgoingGroupParticipant(params.conversationId),
             text,
             direction: 'outgoing',
             timestamp: Date.now(),
@@ -919,6 +932,7 @@ export default function (pi: ExtensionAPI) {
                 await recentsService.recordMessage({
                     messageId: result.messageId!,
                     senderNumber: toRecentSenderNumber(actualOutboundJid),
+                    ...getOutgoingGroupParticipant(toRecentSenderNumber(actualOutboundJid)),
                     text: message,
                     direction: 'outgoing',
                     timestamp: Date.now()
@@ -1027,10 +1041,10 @@ export default function (pi: ExtensionAPI) {
         name: "get_wa_conversation_history",
         label: t("tool.getHistory.label"),
         description: t("tool.getHistory.description"),
-        promptSnippet: "get_wa_conversation_history({senderNumber, limit?}) - Get the most recent messages with a sender. `senderNumber` accepts +E164 (e.g. +14155551212), raw digits, or a JID (e.g. 14155551212@s.whatsapp.net, 120363012345@g.us). Read-only.",
+        promptSnippet: "get_wa_conversation_history({senderNumber, limit?}) - Get the most recent messages with a sender. Group records include participantJid and optional participantName when available. `senderNumber` accepts +E164 (e.g. +14155551212), raw digits, or a JID (e.g. 14155551212@s.whatsapp.net, 120363012345@g.us). Read-only.",
         parameters: Type.Object({
             senderNumber: Type.String({ description: "Phone number (+E164 or raw digits) or WhatsApp JID of the conversation." }),
-            limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: "Maximum number of messages to return (default 20)." }))
+            limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_MESSAGES_PER_CONVERSATION, description: `Maximum number of messages to return (default and maximum ${MAX_MESSAGES_PER_CONVERSATION}).` }))
         }),
         async execute(_toolCallId, params) {
             if (!params.senderNumber || !params.senderNumber.trim()) {
@@ -1042,7 +1056,7 @@ export default function (pi: ExtensionAPI) {
             }
             try {
                 const messages = await recentsService.getConversationHistory(params.senderNumber);
-                const limit = typeof params.limit === 'number' ? params.limit : 20;
+                const limit = typeof params.limit === 'number' ? params.limit : MAX_MESSAGES_PER_CONVERSATION;
                 const sliced = messages.slice(-limit);
                 return {
                     isError: false,
@@ -1146,6 +1160,7 @@ export default function (pi: ExtensionAPI) {
                         await recentsService.recordMessage({
                             messageId: result.messageId ?? `${Date.now()}`,
                             senderNumber: toRecentSenderNumber(actualOutboundJid),
+                            ...getOutgoingGroupParticipant(toRecentSenderNumber(actualOutboundJid)),
                             text,
                             direction: 'outgoing',
                             timestamp: Date.now()

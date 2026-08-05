@@ -8,6 +8,7 @@ import {
     normalizeGroupReplyMode,
     parseRouterAllowConfig
 } from '../src/services/router-allow.config.js';
+import type { IncomingMessage } from '../src/models/whatsapp.types.js';
 import { WhatsAppService } from '../src/services/whatsapp.service.js';
 
 const GROUP_JID = '120363000000000000@g.us';
@@ -33,8 +34,12 @@ async function createHarness() {
     };
 
     let routed = 0;
+    const recorded: IncomingMessage[] = [];
     service.setMessageCallback(() => {
         routed++;
+    });
+    service.setIncomingMessageRecorder((message) => {
+        recorded.push(message);
     });
 
     const handleIncomingMessages = (service as unknown as {
@@ -46,6 +51,7 @@ async function createHarness() {
         manager,
         service,
         getRouted: () => routed,
+        getRecorded: () => [...recorded],
         handleIncomingMessages
     };
 }
@@ -106,6 +112,7 @@ test('mention-only mode ignores ordinary and third-party mentions', async () => 
         await harness.handleIncomingMessages(groupMessage('15559999999@s.whatsapp.net'));
         await harness.handleIncomingMessages(groupMessage('15551234567@lid'));
         assert.equal(harness.getRouted(), 0);
+        assert.equal(harness.getRecorded().length, 3);
     } finally {
         await rm(harness.root, { recursive: true, force: true });
     }
@@ -117,6 +124,10 @@ test('mention-only mode routes phone, LID, wrapped, and media mentions of the ag
         harness.manager.setGroupReplyMode('mentions');
 
         await harness.handleIncomingMessages(groupMessage(AGENT_PHONE_JID));
+        const firstRecorded = harness.getRecorded()[0];
+        assert.equal(firstRecorded?.participantJid, '15550001111@s.whatsapp.net');
+        assert.equal(firstRecorded?.participantName, 'Group Member');
+
         await harness.handleIncomingMessages(groupMessage(AGENT_LID_JID));
         await harness.handleIncomingMessages(groupMessage(undefined, {
             ephemeralMessage: {
