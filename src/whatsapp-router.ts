@@ -519,13 +519,13 @@ export default function (pi: ExtensionAPI) {
         });
 
         const isWhatsappPiOn = pi.getFlag("whatsapp-pi-online") === true;
-        const registered = await sessionManager.isRegistered();
+        const autoConnectAllowed = await sessionManager.canAutoConnect();
 
         // Disk state is authoritative. Session-history snapshots can outlive a
         // remote logout and must not overwrite reauth-required/conflict states.
         const reauthenticationRequired = sessionManager.getStatus() === 'reauth-required';
 
-        if (isWhatsappPiOn && registered && !reauthenticationRequired) {
+        if (isWhatsappPiOn && autoConnectAllowed) {
             ctx.ui.setStatus('whatsapp', '| WhatsApp: Auto-connecting...');
 
             // Retry logic (max 3 attempts, 3s delay)
@@ -553,6 +553,8 @@ export default function (pi: ExtensionAPI) {
             };
 
             await tryConnect();
+        } else if (isWhatsappPiOn && sessionManager.getStatus() === 'connection-conflict') {
+            ctx.ui.setStatus('whatsapp', t('service.whatsapp.conflict'));
         } else if (isWhatsappPiOn && reauthenticationRequired) {
             ctx.ui.setStatus('whatsapp', t('service.whatsapp.reauthRequired'));
             ctx.ui.notify('WhatsApp credentials were rejected. Open /whatsapp and choose Pair New Device to start a fresh QR pairing without restarting Pi.', 'warning');
@@ -768,7 +770,6 @@ export default function (pi: ExtensionAPI) {
                 addressingMode: msg.key.addressingMode,
             });
         }
-        const identity = isGroup ? undefined : identityMapService.get(conversationId);
         let voiceConfig = getDefaultResolvedVoiceReplyConfig();
         try {
             voiceConfig = await loadResolvedVoiceReplyConfig();
@@ -776,24 +777,15 @@ export default function (pi: ExtensionAPI) {
             logger.error('[WhatsApp-Pi-Router] Invalid voice reply settings; using text replies:', error);
         }
         const incomingWasVoice = resolved.kind === 'audio';
-        const prompt = buildPrompt({
-            messageHeader,
-            text,
-            remoteJid,
-            replyJid,
-            alternateJid,
-            isGroup,
-            pushName,
-            participant,
-            conversationId,
-            identity,
-            voiceReplyMode: voiceConfig.mode,
-            incomingWasVoice,
-        });
-
         try {
             const cwd = _ctx?.cwd ?? process.cwd();
             await enqueueConversationTurn(replyJid, async () => {
+                const identity = isGroup ? undefined : await identityMapService.getResolvedIdentity(conversationId);
+                const prompt = buildPrompt({
+                    messageHeader, text, remoteJid, replyJid, alternateJid,
+                    isGroup, pushName, participant, conversationId, identity,
+                    voiceReplyMode: voiceConfig.mode, incomingWasVoice,
+                });
                 const [childPiConfig, sessionLaunch] = await Promise.all([
                     loadResolvedChildPiConfig(),
                     resolveRoutedSessionLaunch(replyJid, cwd)

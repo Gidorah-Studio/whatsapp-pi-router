@@ -1,0 +1,31 @@
+[Unit]
+Description=Emily WhatsApp Pi router (supervised interactive console)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+Environment=HOME=/root
+Environment=LANG=C.UTF-8
+Environment=TERM=tmux-256color
+Environment=PATH=/root/.local/share/pi-node/node-v22.22.3-linux-x64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+EnvironmentFile=/etc/emily-router.env
+RuntimeDirectory=emily-router
+RuntimeDirectoryMode=0700
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/libexec/emily-router/supervise-router.py --socket /run/emily-router/tmux.sock --cwd /root -- /root/.local/share/pi-node/node-v22.22.3-linux-x64/bin/pi --whatsapp-pi-online
+ExecStartPost=/usr/bin/python3 /usr/local/libexec/emily-router/wait-router-ready.py --socket /run/emily-router/tmux.sock --root /root/.pi/agent/extensions/whatsapp-pi --timeout 90
+TimeoutStartSec=120
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=35
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=emily-router
+
+[Install]
+WantedBy=multi-user.target

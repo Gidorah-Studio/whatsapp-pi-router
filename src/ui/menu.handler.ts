@@ -852,7 +852,7 @@ export class MenuHandler {
         const allowedContact = isGroup
             ? this.sessionManager.getAllowedGroup(conversation.senderNumber)
             : this.sessionManager.getAllowedContact(conversation.senderNumber);
-        const identity = isGroup ? undefined : this.identityMapService.get(conversation.senderNumber);
+        const identity = isGroup ? undefined : await this.identityMapService.getResolvedIdentity(conversation.senderNumber);
         const title = t('menu.recents.contact.title', { displayName });
         const historyLabel = t('menu.recents.contact.history');
         const allowContactLabel = isGroup
