@@ -57,6 +57,13 @@ You can also enable direct-chat allow-all mode in `~/.pi/agent/extensions/whatsa
 
 ## Connection reliability and recovery
 
+For Emily's boot/crash supervision, startup readiness checks and the preserved
+tmux console, see [the systemd deployment guide](deploy/README.md).
+Saved linked-device sessions can have `registered=false`: the router also checks
+for the saved account JID that Baileys uses to log in. It never changes credentials
+to make a status flag look healthy. Auto-connect respects persisted authentication
+failures and connection conflicts.
+
 The router records every connection lifecycle transition in a sanitized, structured journal:
 
 ```txt
@@ -128,6 +135,49 @@ WhatsApp may identify direct chats with `@lid` privacy IDs instead of phone-numb
 For direct chats, LID is preferred as the reply identity when WhatsApp provides one. If an incoming message includes both a phone JID and a LID alternate, the router stores the PN↔LID mapping, routes the child Pi session by the LID, and sends replies to the LID. If a manual outbound send starts from a phone JID, Baileys' LID mapping store is checked before send and the message is upgraded to the mapped LID when available.
 
 Use `/whatsapp` → `Recents` → a conversation → `Link Phone`, `Link Email`, or `Link External Record ID` to add business-system context. The child Pi prompt receives the known linked identity as private context. Specific agents can decide whether an external record ID maps to a customer profile, helpdesk ticket, sales record, or another system. WhatsApp display names are still passed as weak candidates for greeting, manual review, or clarifying questions, but they are not stable lookup keys. Groups remain explicit allowlist conversations and do not get identity links.
+
+### External CRM enrichment (separate writer)
+
+The router exclusively owns `identity-map.json`. External CRM jobs must **not**
+rewrite it: the router keeps that map in memory and later persists it.
+
+Instead, a single external sync writes `identity-enrichment.json` beside the map,
+using a private temporary file and atomic rename. Its version-1 format is:
+
+```json
+{
+  "version": 1,
+  "identities": {
+    "123456789@lid": {
+      "basis": { "phone": "15550102030", "email": null, "externalRecordId": null },
+      "phone": "15550102030",
+      "email": "person@example.com",
+      "externalRecordId": "123",
+      "updatedAt": 1788560000000
+    }
+  },
+  "updatedAt": 1788560000000
+}
+```
+
+The router rereads enrichment when each queued turn starts and in the identity
+menu. Only missing `phone`, `email`, and `externalRecordId` are merged into private
+context, and only for an existing routing entry. `basis` must exactly match that
+entry's current three fields (absent/empty is `null`; phone digits and CRM ID are
+normalized as in the router). A changed phone or manual relink invalidates stale
+context instead of mixing records. Routing JIDs and allowlists are never taken
+from enrichment; the merged view is never written back to the router map.
+
+**Clear linked identity** suppresses enrichment for that entry via
+`enrichmentDisabled: true`, including after a restart. Explicitly linking it again
+reenables enrichment. Missing/invalid enrichment falls back to router-only context;
+invalid files emit a sanitized warning. Enrichment changes need no router reload.
+
+Roll out the reader and producer together, pause old shared-file writers first,
+and preserve existing router links for compatibility. Do not restore a stale
+identity-map backup over new conversations on rollback. Keep old shared-file sync
+jobs disabled if rolling the reader back. This storage boundary does not establish
+identity ownership: the producer must separately validate its matching policy.
 
 ## Outbound queue
 

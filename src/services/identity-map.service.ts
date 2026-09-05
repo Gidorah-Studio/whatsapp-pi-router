@@ -15,6 +15,8 @@ export interface IdentityMapEntry {
     email?: string;
     externalRecordId?: string;
     addressingMode?: string;
+    /** Explicit operator clear: do not resurrect external enrichment. */
+    enrichmentDisabled?: boolean;
     source: IdentityMapSource;
     updatedAt: number;
 }
@@ -92,11 +94,18 @@ function hasLinkedIdentity(entry: IdentityMapEntry): boolean {
 }
 
 export class IdentityMapService {
-    private readonly storagePaths = createStoragePaths();
-    private readonly storePath = join(this.storagePaths.root, 'identity-map.json');
+    private readonly storagePaths;
+    private readonly storePath: string;
+    private readonly enrichmentPath: string;
     private entries = new Map<string, IdentityMapEntry>();
     private initialized = false;
     private writeQueue: Promise<void> = Promise.resolve();
+
+    constructor(root?: string) {
+        this.storagePaths = createStoragePaths(root);
+        this.storePath = join(this.storagePaths.root, 'identity-map.json');
+        this.enrichmentPath = join(this.storagePaths.root, 'identity-enrichment.json');
+    }
 
     async ensureInitialized() {
         if (this.initialized) return;
@@ -107,6 +116,38 @@ export class IdentityMapService {
 
     get(conversationId: string): IdentityMapEntry | undefined {
         return this.entries.get(conversationId);
+    }
+
+    /** Fresh business context only. Never store this merged view or use it for delivery routing. */
+    async getResolvedIdentity(conversationId: string): Promise<IdentityMapEntry | undefined> {
+        await this.ensureInitialized();
+        const base = this.get(conversationId);
+        if (!base || base.enrichmentDisabled) return base;
+
+        try {
+            const store = JSON.parse(await readFile(this.enrichmentPath, 'utf8'));
+            if (store?.version !== 1 || !store.identities || Array.isArray(store.identities)
+                || typeof store.identities !== 'object') throw new Error('Invalid enrichment store');
+            const candidate = store.identities[conversationId];
+            if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return base;
+            const fields = ['phone', 'email', 'externalRecordId'] as const;
+            // Bind enrichment to the router identity observed by the sync. A manual
+            // relink or changed WhatsApp phone must invalidate the old CRM context.
+            if (!candidate.basis || fields.some(key => candidate.basis[key] !== (base[key] || null))) return base;
+            if (fields.some(key => candidate[key] != null && typeof candidate[key] !== 'string')) return base;
+            return {
+                ...base,
+                phone: base.phone || normalizePhoneDigits(candidate.phone),
+                email: base.email || normalizeIdentityEmail(candidate.email),
+                externalRecordId: base.externalRecordId || candidate.externalRecordId?.trim() || undefined,
+            };
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                // No raw file contents, paths or errors in customer-facing output.
+                console.warn('[IdentityMap] External enrichment unavailable; using router identity only.');
+            }
+            return base;
+        }
     }
 
     findByJid(jid: string): IdentityMapEntry | undefined {
@@ -235,6 +276,7 @@ export class IdentityMapService {
             externalRecordId: patch.externalRecordId?.trim() || existing?.externalRecordId,
             addressingMode: existing?.addressingMode,
             source: 'manual',
+            enrichmentDisabled: false,
             updatedAt: Date.now()
         };
         this.entries.set(conversationId, next);
@@ -255,6 +297,7 @@ export class IdentityMapService {
             pushName: existing.pushName,
             addressingMode: existing.addressingMode,
             source: existing.source,
+            enrichmentDisabled: true,
             updatedAt: Date.now()
         };
         this.entries.set(conversationId, next);
@@ -273,6 +316,7 @@ export class IdentityMapService {
             email: patch.email ?? existing?.email,
             externalRecordId: patch.externalRecordId ?? existing?.externalRecordId,
             addressingMode: patch.addressingMode ?? existing?.addressingMode,
+            enrichmentDisabled: patch.enrichmentDisabled ?? existing?.enrichmentDisabled,
             source: patch.source ?? existing?.source ?? 'auto',
             updatedAt: patch.updatedAt ?? Date.now()
         };
@@ -319,8 +363,9 @@ export class IdentityMapService {
             phoneJid: isPhoneJid(phoneJid) ? phoneJid : undefined,
             alternateJid: typeof candidate.alternateJid === 'string' ? normalizeDirectJid(candidate.alternateJid) ?? candidate.alternateJid : undefined,
             email: typeof candidate.email === 'string' ? normalizeIdentityEmail(candidate.email) : undefined,
-            externalRecordId: typeof candidate.externalRecordId === 'string' ? candidate.externalRecordId : undefined,
+            externalRecordId: typeof candidate.externalRecordId === 'string' ? candidate.externalRecordId.trim() || undefined : undefined,
             addressingMode: typeof candidate.addressingMode === 'string' ? candidate.addressingMode : undefined,
+            enrichmentDisabled: candidate.enrichmentDisabled === true,
             source: candidate.source === 'manual' ? 'manual' : 'auto',
             updatedAt: typeof candidate.updatedAt === 'number' ? candidate.updatedAt : Date.now()
         };
@@ -338,7 +383,8 @@ export class IdentityMapService {
             && left?.email === right.email
             && left?.externalRecordId === right.externalRecordId
             && left?.addressingMode === right.addressingMode
-            && left?.source === right.source;
+            && left?.source === right.source
+            && Boolean(left?.enrichmentDisabled) === Boolean(right.enrichmentDisabled);
     }
 
     private async persistQueued() {

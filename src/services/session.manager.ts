@@ -55,6 +55,8 @@ export class SessionManager {
     private allowAllDirectChats = false;
     private allowAllGroups = false;
     private hasAuthState = false;
+    // A persisted "connected" status is not evidence of a socket in this process.
+    private liveConnected = false;
     private openaiKey: string = '';
     private visionModel: string = 'gpt-4o';
     private operatorJid: string = '';
@@ -450,7 +452,7 @@ export class SessionManager {
     }
 
     public async isRegistered(): Promise<boolean> {
-        if (this.status === 'connected') {
+        if (this.liveConnected) {
             if (!this.hasAuthState) {
                 this.hasAuthState = true;
                 await this.saveConfig();
@@ -460,6 +462,11 @@ export class SessionManager {
 
         await this.syncAuthStateFromDisk();
         return this.hasAuthState;
+    }
+
+    public async canAutoConnect(): Promise<boolean> {
+        return !['reauth-required', 'connection-conflict'].includes(this.status)
+            && await this.isRegistered();
     }
 
     async markAuthStateAvailable() {
@@ -497,6 +504,7 @@ export class SessionManager {
         }
 
         this.hasAuthState = false;
+        this.liveConnected = false;
         this.status = 'reauth-required';
         await this.saveConfig();
         return quarantinePath;
@@ -529,8 +537,14 @@ export class SessionManager {
         try {
             const credentials = JSON.parse(await readFile(join(this.authStateDir, 'creds.json'), 'utf8')) as {
                 registered?: unknown;
+                me?: { id?: unknown } | null;
             };
-            return credentials.registered === true;
+            // Baileys uses creds.me to select login instead of QR registration.
+            // Linked-device sessions can retain registered=false after pairing.
+            // Accept a saved account JID, not a merely existing/unpaired creds file.
+            return credentials.registered === true
+                || (typeof credentials.me?.id === 'string'
+                    && /^[0-9]+(?::[0-9]+)?@s\.whatsapp\.net$/.test(credentials.me.id));
         } catch {
             return false;
         }
@@ -540,6 +554,7 @@ export class SessionManager {
         await rm(this.authStateDir, { recursive: true, force: true });
         await mkdir(this.authStateDir, { recursive: true, mode: 0o700 });
         this.status = 'logged-out';
+        this.liveConnected = false;
         this.hasAuthState = false;
         await this.saveConfig();
     }
@@ -549,6 +564,7 @@ export class SessionManager {
     }
 
     async setStatus(status: SessionStatus) {
+        this.liveConnected = status === 'connected';
         this.status = status;
         await this.saveConfig();
     }
