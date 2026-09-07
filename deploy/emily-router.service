@@ -1,3 +1,5 @@
+# Legacy host-specific example retained for existing deployments.
+# For new agents, render whatsapp-router.service.in instead (see README.md).
 [Unit]
 Description=Emily WhatsApp Pi router (supervised interactive console)
 Wants=network-online.target

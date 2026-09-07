@@ -99,8 +99,10 @@ def supervise(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--socket', type=Path, required=True)
-    parser.add_argument('--session', default='emily')
-    parser.add_argument('--cwd', default='/root')
+    parser.add_argument('--session', default='emily',
+                        help='Tmux session name; legacy default retained for existing units')
+    parser.add_argument('--cwd', default='/root',
+                        help='Working directory; new units should always set this explicitly')
     parser.add_argument('--stop-timeout', type=float, default=20)
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -108,6 +110,10 @@ def main():
         args.command = args.command[1:]
     if not args.command or not Path(args.command[0]).is_absolute():
         parser.error('An absolute executable path is required after --')
+    if not args.session or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for c in args.session):
+        parser.error('session must contain only letters, digits, underscores, or hyphens')
+    if not Path(args.cwd).is_absolute():
+        parser.error('Use an absolute working directory')
     if not args.socket.is_absolute() or args.stop_timeout <= 0:
         parser.error('Use an absolute socket path and positive stop timeout')
     try:

@@ -1,0 +1,33 @@
+# Template: replace every @TOKEN@ before installing. See deploy/README.md.
+[Unit]
+Description=WhatsApp Pi router for @AGENT@ (supervised interactive console)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@WORKDIR@
+Environment=HOME=@HOME@
+Environment=PI_CODING_AGENT_DIR=@PI_CONFIG_DIR@
+Environment=LANG=C.UTF-8
+Environment=TERM=tmux-256color
+Environment=PATH=@NODE_BIN_DIR@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/etc/whatsapp-router/@AGENT@.env
+RuntimeDirectory=whatsapp-router-@AGENT@
+RuntimeDirectoryMode=0700
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/libexec/whatsapp-router/supervise-router.py --socket /run/whatsapp-router-@AGENT@/tmux.sock --session @AGENT@ --cwd @WORKDIR@ -- @PI_BIN@ --whatsapp-pi-online
+ExecStartPost=/usr/bin/python3 /usr/local/libexec/whatsapp-router/wait-router-ready.py --socket /run/whatsapp-router-@AGENT@/tmux.sock --session @AGENT@ --root @ROUTER_STATE_DIR@ --timeout 90
+TimeoutStartSec=120
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=35
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=whatsapp-router-@AGENT@
+
+[Install]
+WantedBy=multi-user.target

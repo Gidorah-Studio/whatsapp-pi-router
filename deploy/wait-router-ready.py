@@ -60,7 +60,7 @@ def read_events(path):
     return events
 
 
-def wait_ready(socket, root, timeout):
+def wait_ready(socket, root, timeout, session='emily'):
     # ExecStartPost runs alongside wrapper startup. Ignore old journal entries,
     # including entries from a historical process with a reused PID.
     since = time.time() - 10
@@ -68,7 +68,7 @@ def wait_ready(socket, root, timeout):
     while time.monotonic() < deadline:
         try:
             result = subprocess.run(['/usr/bin/tmux', '-S', str(socket), 'display-message',
-                                     '-p', '-t', 'emily:0.0', '#{pane_pid} #{pane_dead}'],
+                                     '-p', '-t', f'{session}:0.0', '#{pane_pid} #{pane_dead}'],
                                     capture_output=True, text=True, timeout=3)
             parts = result.stdout.strip().split()
             if result.returncode == 0 and len(parts) == 2 and parts[0].isdigit() and parts[1] == '0':
@@ -92,11 +92,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--socket', type=Path, required=True)
     parser.add_argument('--root', type=Path, required=True)
+    parser.add_argument('--session', default='emily',
+                        help='Tmux session name; legacy default retained for existing units')
     parser.add_argument('--timeout', type=float, default=90)
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error('timeout must be positive')
-    return wait_ready(args.socket, args.root, args.timeout)
+    if not args.session or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for c in args.session):
+        parser.error('session must contain only letters, digits, underscores, or hyphens')
+    return wait_ready(args.socket, args.root, args.timeout, args.session)
 
 
 if __name__ == '__main__':

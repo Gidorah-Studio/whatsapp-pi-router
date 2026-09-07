@@ -62,8 +62,10 @@ You can also configure these routing controls in `~/.pi/agent/extensions/whatsap
 
 ## Connection reliability and recovery
 
-For Emily's boot/crash supervision, startup readiness checks and the preserved
-tmux console, see [the systemd deployment guide](deploy/README.md).
+For always-on agents, configure boot/crash supervision, startup readiness checks,
+and an attachable tmux console using [the systemd deployment guide](deploy/README.md).
+Installing the extension and connecting through `/whatsapp` do not create a service;
+use the generic deployment template and adapt it to the target agent.
 Saved linked-device sessions can have `registered=false`: the router also checks
 for the saved account JID that Baileys uses to log in. It never changes credentials
 to make a status flag look healthy. Auto-connect respects persisted authentication

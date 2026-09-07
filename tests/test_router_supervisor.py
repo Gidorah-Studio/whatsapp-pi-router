@@ -20,6 +20,42 @@ class SupervisorTests(unittest.TestCase):
         return argparse.Namespace(socket=Path('/tmp/isolated-test/tmux.sock'), session='emily',
                                   cwd='/root', command=['/usr/bin/pi', '--whatsapp-pi-online'], stop_timeout=1)
 
+    def test_generic_unit_uses_matching_explicit_session_and_socket(self):
+        unit = (Path(__file__).resolve().parents[1] / 'deploy/whatsapp-router.service.in').read_text()
+        values = {'AGENT': 'sales', 'USER': 'sales', 'HOME': '/home/sales',
+                  'WORKDIR': '/home/sales/work', 'PI_CONFIG_DIR': '/home/sales/.pi/agent',
+                  'NODE_BIN_DIR': '/opt/node/bin', 'PI_BIN': '/opt/node/bin/pi',
+                  'ROUTER_STATE_DIR': '/home/sales/.pi/agent/extensions/whatsapp-pi'}
+        for key, value in values.items():
+            unit = unit.replace(f'@{key}@', value)
+        directives = '\n'.join(line for line in unit.splitlines() if not line.startswith('#'))
+        self.assertNotIn('@', directives)
+        self.assertNotIn('/root', directives)
+        self.assertNotIn('emily', directives)
+        commands = [line for line in unit.splitlines() if line.startswith(('ExecStart=', 'ExecStartPost='))]
+        self.assertEqual(len(commands), 2)
+        for command in commands:
+            self.assertIn('--session sales', command)
+            self.assertIn('--socket /run/whatsapp-router-sales/tmux.sock', command)
+        self.assertIn('--cwd /home/sales/work', commands[0])
+        self.assertIn('--root /home/sales/.pi/agent/extensions/whatsapp-pi', commands[1])
+
+    def test_cli_accepts_generic_paths_and_preserves_legacy_defaults(self):
+        for extra, session, cwd in [([], 'emily', '/root'), (['--session', 'sales', '--cwd', '/home/sales'], 'sales', '/home/sales')]:
+            with self.subTest(session=session), patch.object(m.sys, 'argv', ['supervisor', '--socket', '/tmp/private.sock', *extra, '--', '/usr/bin/pi']), \
+                 patch.object(m, 'supervise', return_value=0) as run:
+                self.assertEqual(m.main(), 0)
+                args = run.call_args.args[0]
+                self.assertEqual((args.session, args.cwd), (session, cwd))
+
+    def test_cli_rejects_invalid_session_and_relative_cwd(self):
+        for extra in [['--session', 'bad:0'], ['--session', ''], ['--cwd', 'relative']]:
+            with self.subTest(extra=extra), patch.object(m.sys, 'argv', ['supervisor', '--socket', '/tmp/private.sock', *extra, '--', '/usr/bin/pi']), \
+                 patch.object(m, 'supervise') as run, patch.object(m.sys, 'stderr'):
+                with self.assertRaises(SystemExit):
+                    m.main()
+                run.assert_not_called()
+
     def test_dead_missing_or_invalid_pane_is_not_a_live_process(self):
         for response in [result(1), result(0, '123 1'), result(0, '1 0'), result(0, 'not-a-pid 0'), result(0, '')]:
             with patch.object(m, 'tmux', return_value=response):
@@ -56,7 +92,13 @@ class SupervisorTests(unittest.TestCase):
     def test_process_exit_requests_restart_and_cleans_private_server(self, _mkdir, _signals):
         with patch.object(m, 'tmux', side_effect=[result(1), result(0, '%0 123'), result()]) as tmux, \
              patch.object(m, 'pane_pid', side_effect=[123, None, None]), patch.object(m.time, 'sleep'):
-            self.assertEqual(m.supervise(self.args()), 1)
+            args = self.args()
+            args.session = 'sales'
+            args.cwd = '/home/sales'
+            self.assertEqual(m.supervise(args), 1)
+        start = tmux.call_args_list[1].args
+        self.assertEqual(start[start.index('-s') + 1], 'sales')
+        self.assertEqual(start[start.index('-c') + 1], '/home/sales')
         self.assertEqual(tmux.call_args_list[-1].args, (self.args().socket, 'kill-server'))
         self.assertEqual(tmux.call_args_list[1].args[-1], 'exec /usr/bin/pi --whatsapp-pi-online')
 
