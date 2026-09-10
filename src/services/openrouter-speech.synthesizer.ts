@@ -5,6 +5,7 @@ export interface SpeechSynthesisOptions {
     model: string;
     voice: string;
     speed: number;
+    signal?: AbortSignal;
 }
 
 export type SpeechAudioFormat = 'mp3' | 'pcm';
@@ -53,7 +54,8 @@ export function createOpenRouterSpeechSynthesizer(logger: AudioLogger): SpeechSy
                 url: OPENROUTER_SPEECH_URL,
                 apiKey,
                 body,
-                accept: format === 'pcm' ? 'audio/pcm' : 'audio/mpeg'
+                accept: format === 'pcm' ? 'audio/pcm' : 'audio/mpeg',
+                signal: options.signal,
             });
             return { audio, format };
         }
@@ -65,6 +67,7 @@ interface PostForAudioOptions {
     apiKey: string;
     body: string;
     accept: 'audio/mpeg' | 'audio/pcm';
+    signal?: AbortSignal;
 }
 
 async function postForAudio(options: PostForAudioOptions): Promise<Buffer> {
@@ -77,6 +80,7 @@ async function postForAudio(options: PostForAudioOptions): Promise<Buffer> {
         const request = https.request(url, {
             method: 'POST',
             timeout: REQUEST_TIMEOUT_MS,
+            signal: AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), ...(options.signal ? [options.signal] : [])]),
             headers: {
                 Authorization: `Bearer ${options.apiKey}`,
                 Accept: options.accept,

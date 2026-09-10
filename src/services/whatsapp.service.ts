@@ -5,6 +5,9 @@ import {
     extractMessageContent
 } from 'baileys';
 import P from 'pino';
+import { InboundLedger, inboundDedupKeys, type InboundClaimStore } from './inbound-ledger.js';
+import { SerialQueue } from './private-storage.js';
+import { safeFailure } from './router-errors.js';
 import { SessionManager } from './session.manager.js';
 import { IncomingMessage, SessionStatus } from '../models/whatsapp.types.js';
 import { MessageSender } from './message.sender.js';
@@ -85,6 +88,7 @@ interface IncomingMessageLike {
 }
 
 interface MessagesUpsertEvent {
+    type?: string;
     messages?: IncomingMessageLike[];
 }
 
@@ -177,7 +181,10 @@ export class WhatsAppService {
     private reconnectTimeout?: ReturnType<typeof setTimeout>;
     private intentionalStop = false;
     private onQRCode?: (qr: string) => void;
-    private onMessage?: (m: MessagesUpsertEvent) => void;
+    private onMessage?: (m: MessagesUpsertEvent) => void | Promise<void>;
+    private readonly inboundAdmissions = new SerialQueue();
+    private pendingAdmissions = 0;
+    private readonly inboundCompletions = new Set<Promise<void>>();
     private onStatusUpdate?: (status: string) => void;
     private onLidMapping?: (mapping: { lid: string; pn: string }) => void | Promise<void>;
     private lastRemoteJid: string | null = null;
@@ -192,7 +199,8 @@ export class WhatsAppService {
 
     constructor(
         sessionManager: SessionManager,
-        private readonly connectionJournal = new ConnectionEventJournal()
+        private readonly connectionJournal = new ConnectionEventJournal(),
+        private readonly inboundLedger: InboundClaimStore = new InboundLedger()
     ) {
         this.sessionManager = sessionManager;
         this.messageSender = new MessageSender(this);
@@ -611,27 +619,14 @@ export class WhatsAppService {
     }
 
     private registerSocketListeners(socket: WhatsAppSocketLike, options: WhatsAppStartOptions, saveCreds: () => Promise<void>) {
-        socket.ev.on('creds.update', async () => {
-            // A creds file also exists during QR pairing with registered=false.
-            // Only connection-open marks the session as registered.
-            await saveCreds();
-        });
-
-        socket.ev.on('connection.update', async (update) => {
-            await this.handleConnectionUpdate(update, options);
-        });
-
-        socket.ev.on('messages.upsert', (payload) => {
-            void this.handleIncomingMessages(payload);
-        });
-
-        socket.ev.on('lid-mapping.update', (payload: LidMappingPayload) => {
-            void this.handleLidMappingUpdate(payload);
-        });
-
-        socket.ev.on('chats.phoneNumberShare', (payload: PhoneNumberSharePayload) => {
-            void this.handlePhoneNumberShare(payload);
-        });
+        const observe = (phase: string, task: () => Promise<unknown>) => {
+            void Promise.resolve().then(task).catch(error => this.reportAsyncFailure(error, phase));
+        };
+        socket.ev.on('creds.update', () => observe('save-credentials', saveCreds));
+        socket.ev.on('connection.update', update => observe('connection-update', () => this.handleConnectionUpdate(update, options)));
+        socket.ev.on('messages.upsert', payload => observe('inbound-admission', () => this.handleIncomingMessages(payload)));
+        socket.ev.on('lid-mapping.update', (payload: LidMappingPayload) => observe('lid-mapping', () => this.handleLidMappingUpdate(payload)));
+        socket.ev.on('chats.phoneNumberShare', (payload: PhoneNumberSharePayload) => observe('phone-share', () => this.handlePhoneNumberShare(payload)));
 
         socket.ev.on('messages.update', (payload: MessageUpdatePayload[]) => {
             this.logMessageUpdates(payload);
@@ -970,7 +965,62 @@ export class WhatsAppService {
         return process.env.WHATSAPP_ROUTER_RECORD_IGNORED === 'true';
     }
 
-    public async handleIncomingMessages(payload: MessagesUpsertEvent) {
+    private reportAsyncFailure(error: unknown, phase: string): void {
+        const failure = safeFailure(error, phase);
+        fileLog(failure.diagnostic);
+        console.error('[WhatsApp-Pi]', failure.diagnostic);
+    }
+
+    public async handleIncomingMessages(payload: MessagesUpsertEvent): Promise<void> {
+        // Reserve admissions synchronously so overlapping socket events retain arrival order.
+        const admissions: Promise<void>[] = [];
+        for (const message of payload.messages ?? []) {
+            if (this.pendingAdmissions >= 1000) {
+                this.reportAsyncFailure(new Error('Admission capacity reached'), 'inbound-overload');
+                continue;
+            }
+            this.pendingAdmissions++;
+            admissions.push(this.inboundAdmissions.run(async () => {
+                try { await this.handleIncomingMessage({ ...payload, messages: [message] }); }
+                catch (error) { this.reportAsyncFailure(error, 'inbound-admission'); }
+                finally { this.pendingAdmissions--; }
+            }));
+        }
+        await Promise.all(admissions);
+    }
+
+    async drainIncoming(): Promise<void> {
+        await this.inboundAdmissions.drain();
+        await Promise.all(this.inboundCompletions);
+    }
+
+    private async dispatchIncoming(payload: MessagesUpsertEvent): Promise<void> {
+        const message = payload.messages?.[0];
+        if (!message?.message) return;
+        // Baileys also emits append for newly delivered offline messages. Do not
+        // discard them as history: claim IDs to distinguish unseen messages from replays.
+        if (payload.type && payload.type !== 'notify' && payload.type !== 'append') return;
+        const keys = inboundDedupKeys(message.key);
+        if (!keys.length || !this.onMessage || !await this.inboundLedger.claim(keys)) return;
+        // Invoke synchronously so the conversation scheduler can reserve its FIFO position.
+        // Observe completion without blocking admission of other conversations.
+        try {
+            const completion = this.onMessage(payload);
+            const pending = Promise.resolve(completion)
+                .then(() => this.inboundLedger.finish(keys, 'completed'), async error => {
+                    this.reportAsyncFailure(error, 'inbound-turn');
+                    await this.inboundLedger.finish(keys, 'failed');
+                })
+                .catch(error => this.reportAsyncFailure(error, 'inbound-ledger'));
+            this.inboundCompletions.add(pending);
+            void pending.then(() => this.inboundCompletions.delete(pending));
+        } catch (error) {
+            this.reportAsyncFailure(error, 'inbound-turn');
+            await this.inboundLedger.finish(keys, 'failed');
+        }
+    }
+
+    private async handleIncomingMessage(payload: MessagesUpsertEvent) {
         if (this.sessionManager.getStatus() !== 'connected') return;
 
         const message = payload.messages?.[0];
@@ -1019,7 +1069,7 @@ export class WhatsAppService {
 
             void this.recordIncomingMessage(message, remoteJid, text);
             this.lastRemoteJid = remoteJid;
-            this.onMessage?.(payload);
+            await this.dispatchIncoming(payload);
             return;
         }
 
@@ -1044,14 +1094,14 @@ export class WhatsAppService {
 
         void this.recordIncomingMessage(message, remoteJid, text);
         this.lastRemoteJid = remoteJid;
-        this.onMessage?.(payload);
+        await this.dispatchIncoming(payload);
     }
 
     setQRCodeCallback(callback: (qr: string) => void) {
         this.onQRCode = callback;
     }
 
-    setMessageCallback(callback: (m: MessagesUpsertEvent) => void) {
+    setMessageCallback(callback: (m: MessagesUpsertEvent) => void | Promise<void>) {
         this.onMessage = callback;
     }
 

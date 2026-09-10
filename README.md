@@ -14,7 +14,7 @@ Each WhatsApp thread gets a deterministic private session directory:
 On each inbound message, the extension runs a headless Pi turn that continues the latest session in that conversation directory:
 
 ```bash
-pi --session-dir <conversation-directory> --continue [--model <provider/model>] [--thinking <level>] --no-extensions --extension <child-media-extension> --print "<message>"
+printf '%s' "<message>" | pi --session-dir <conversation-directory> --continue [--model <provider/model>] [--thinking <level>] --no-extensions --extension <child-media-extension> --print
 ```
 
 Pi generates the session's standard UUIDv7 identifier. The directory keeps contacts and groups isolated without exposing custom router IDs to model providers. The model and thinking arguments are included when configured, and the final stdout is sent back to the originating WhatsApp chat.
@@ -90,6 +90,88 @@ Disconnect handling uses explicit recovery classes:
 When reauthentication is required, open `/whatsapp` and select `Pair New Device (Reset Stale Credentials)`. The router closes the stale socket, moves its local auth directory into `auth-quarantine/`, creates a fresh auth directory, and starts QR pairing in the same Pi process. No Pi restart or manual file rename is required. Only the three newest quarantined auth directories are retained. `Logoff (Delete Session)` also guarantees local credential deletion even when the remote logout call fails.
 
 An exclusive lock next to each auth directory prevents two Pi processes from using the same WhatsApp credentials. The lock is acquired lazily when a process connects or changes auth, stale locks are recovered, and a live second owner fails with an actionable error instead of replacing the first connection.
+
+## Message reliability and resource limits
+
+Every member of an inbound batch is checked independently. Both `notify` and
+`append` upserts are eligible: Baileys uses `append` for new offline deliveries as
+well as some replayed messages. Deduplication suppresses previously claimed IDs
+rather than discarding offline messages. Bulk `messaging-history.set` events are
+not routed. Messages without a WhatsApp message ID are not routed.
+
+Before dispatch, the router atomically writes a hashed conversation/message claim
+to `inbound-ledger.json`. PN/LID aliases supplied together in message metadata share
+deduplication. Existing pre-upgrade history is not backfilled. Claims remain for
+7 days, including completed, failed, and interrupted turns. Replayed claims do not
+rerun the agent, even after a restart. This is **at-most-once dispatch within the
+retention window**, not an exactly-once delivery guarantee or a durable inbound
+work queue. A crash after claiming can leave an unanswered message; an operator
+must check the conversation/action outcome before requesting another turn. A
+`claimed` entry after restart can mean interrupted or uncertain work. Do not delete
+the ledger to retry one message: that would enable unrelated replays.
+
+The ledger has a 20,000-alias-entry cap. Saturation, corruption, or write failure
+stops new dispatch and emits an operator diagnostic rather than evicting recent
+claims. The original corrupt file stays untouched. The admission buffer is capped
+at 1,000 messages; overflow is logged and not automatically retried.
+
+Turns enter their conversation FIFO **before** download/transcription/OCR. Defaults
+are 4 active turns globally, 10 active-or-waiting turns per chat, and 100 globally.
+An overloaded conversation receives a short busy notice and must send a new
+message later. Other chats can progress while one conversation is busy.
+
+| Environment variable | Default | Limit |
+| --- | --- | --- |
+| `WHATSAPP_ROUTER_MAX_CONCURRENT_TURNS` | `4` | Up to 32 |
+| `WHATSAPP_ROUTER_MAX_CHAT_BACKLOG` | `10` | Up to 1,000; includes active turn |
+| `WHATSAPP_ROUTER_MAX_BACKLOG` | `100` | Up to 10,000; includes active turns |
+| `WHATSAPP_ROUTER_MEDIA_MAX_BYTES` | `20971520` (20 MiB) | Up to 100 MiB per attachment |
+| `WHATSAPP_ROUTER_MEDIA_TIMEOUT_MS` | `120000` | Per download, OCR/STT subprocess, or audio conversion |
+| `WHATSAPP_ROUTER_CHILD_MAX_OUTPUT_BYTES` | `1048576` (1 MiB) | Up to 16 MiB combined stdout/stderr |
+
+Invalid, non-integer, zero, or out-of-range values fall back to defaults. Incoming
+text is limited to 65,536 characters. Media byte limits check both advertised and
+actually downloaded sizes. Downloads respect cancellation. PDF previews parse at
+most 3 pages with one OCR worker. Audio decoding is limited to under 10 minutes.
+Native OCR/STT runs in a separate process with a 512 MiB V8 heap limit; this is not
+an OS-level native-memory sandbox. Local Whisper initializes per audio subprocess,
+which trades additional startup overhead for cancellable, isolated native work.
+
+On timeout, output overflow, or shutdown, managed processes terminate before their
+conversation slot is released. On Linux/macOS the router signals the child process
+group and discovered descendants (including detached tool subprocesses), escalates
+to `SIGKILL` after 2 seconds, and waits for exit. `ps` must be installed. Windows
+uses `taskkill /T /F`. If tree cleanup cannot be verified, the turn stays blocked
+and an operator warning is emitted rather than risking concurrent session writers.
+This does not contain deliberately escaping processes or recover orphaned agents
+after a hard host/router crash; OS service/container supervision remains necessary.
+Voice synthesis also receives shutdown cancellation and has a 120-second total
+request deadline. WhatsApp `/abort` is still not implemented.
+
+Routed failures return a generic notice with a reference ID, never raw child stderr
+or exception details. Matching diagnostics contain a phase, classified failure
+kind, and numeric child exit code when available. History-write failures after a successful routed send are logged
+without sending an extra error or fallback reply. Outbound file-queue recovery is
+unchanged by these inbound reliability changes.
+
+## Private storage and attachment retention
+
+New received media lives under `whatsapp-medias/incoming/<conversation-hash>/`.
+Temporary audio/decoded WAV files are removed after the turn; incoming images use
+the private per-turn handoff directory and are removed on success or failure.
+Directories are mode `0700` and files `0600` on POSIX systems. New documents are
+stored in each conversation's `documents/` directory with unique sanitized names
+and **kept until manually deleted**, so follow-up turns can reopen them. Prompts
+receive the document's absolute path. Existing shared documents and old temporary
+files are not moved or deleted. A hard crash can leave temporary artifacts for
+operator cleanup; no automatic sweep deletes potentially active files.
+
+Recents and identity-map writes use private, same-directory atomic replacements;
+recents mutations are serialized. Corrupt/unreadable recents block initialization
+and preserve the original file for recovery instead of silently resetting history.
+Recents retain up to 500 conversations, 200 messages each, and 16,384 characters per
+message. Session directories separate history, **not OS permissions**: these
+changes do not sandbox the child agent's filesystem, shell, or inherited credentials.
 
 ## Speech-to-text for WhatsApp voice notes
 
@@ -268,7 +350,15 @@ Run checks:
 ```bash
 npm run typecheck
 npm test
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
+
+`npm test` runs against an isolated temporary home so default router paths cannot
+modify the operator's live state. Regression tests exercise multi-message batches,
+replays/restarts, real child-process termination, FIFO/backpressure, private media
+cleanup, and concurrent/corrupt persistence. Audio conversion tests need `ffmpeg`
+and are skipped when it is unavailable; live WhatsApp/provider integration is not
+part of the unit suite.
 
 ## Notes
 

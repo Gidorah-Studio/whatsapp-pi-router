@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'fs/promises';
+import { mkdir, readFile } from 'fs/promises';
+import { atomicWritePrivate } from './private-storage.js';
 import { join } from 'path';
 import { createStoragePaths } from './storage-path.js';
 
@@ -393,20 +394,12 @@ export class IdentityMapService {
     }
 
     private async persistStore() {
-        const tempPath = `${this.storePath}.${process.pid}.${Date.now()}.tmp`;
         const store: IdentityMapStore = {
             version: STORE_VERSION,
             identities: Object.fromEntries([...this.entries.entries()].sort(([left], [right]) => left.localeCompare(right))),
             updatedAt: Date.now()
         };
         const serialized = JSON.stringify(store, null, 2);
-        await mkdir(this.storagePaths.root, { recursive: true });
-        await writeFile(tempPath, serialized);
-        try {
-            await rename(tempPath, this.storePath);
-        } catch {
-            await writeFile(this.storePath, serialized);
-            await rm(tempPath, { force: true });
-        }
+        await atomicWritePrivate(this.storePath, serialized);
     }
 }

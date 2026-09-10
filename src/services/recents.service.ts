@@ -1,4 +1,5 @@
-import { readFile, writeFile } from 'fs/promises';
+import { readFile } from 'fs/promises';
+import { atomicWritePrivate, isMissingFile, SerialQueue } from './private-storage.js';
 import { createStoragePaths, ensureStorageDirectories as ensureStorageRoots, migrateLegacyStorage } from './storage-path.js';
 import type {
     MessageDirection,
@@ -23,16 +24,24 @@ export interface RecentsMessageInput {
 }
 
 export class RecentsService {
-    private readonly storagePaths = createStoragePaths();
-    private readonly dataDir = this.storagePaths.recentsDir;
-    private readonly storePath = this.storagePaths.recentsPath;
+    private readonly storagePaths;
+    private readonly writes = new SerialQueue();
+    private storageError?: Error;
+    private readonly dataDir: string;
+    private readonly storePath: string;
     private store: RecentsStore = {
         conversations: [],
         messagesBySender: {},
         updatedAt: Date.now()
     };
 
-    constructor(private readonly sessionManager: SessionManager) {}
+    constructor(private readonly sessionManager: SessionManager, root?: string) {
+        this.storagePaths = createStoragePaths(root);
+        this.dataDir = this.storagePaths.recentsDir;
+        this.storePath = this.storagePaths.recentsPath;
+    }
+
+    async drain(): Promise<void> { await this.writes.drain(); }
 
     async ensureInitialized() {
         await ensureStorageRoots({
@@ -52,6 +61,10 @@ export class RecentsService {
         try {
             const content = await readFile(this.storePath, 'utf-8');
             const parsed = JSON.parse(content) as Partial<RecentsStore>;
+            if (!parsed || !Array.isArray(parsed.conversations) || !parsed.messagesBySender ||
+                typeof parsed.messagesBySender !== 'object' || Array.isArray(parsed.messagesBySender)) {
+                throw new Error('Invalid recents store');
+            }
 
             this.store = {
                 conversations: Array.isArray(parsed.conversations) ? parsed.conversations.slice(0, MAX_RECENT_CONVERSATIONS) : [],
@@ -62,7 +75,13 @@ export class RecentsService {
             };
 
             this.rebuildConversationState();
-        } catch {
+            this.storageError = undefined;
+        } catch (error) {
+            if (!isMissingFile(error)) {
+                this.storageError = new Error('Recents storage unavailable; existing file preserved', { cause: error });
+                throw this.storageError;
+            }
+            this.storageError = undefined;
             this.store = {
                 conversations: [],
                 messagesBySender: {},
@@ -157,7 +176,7 @@ export class RecentsService {
 
     private async persistStore() {
         this.store.updatedAt = Date.now();
-        await writeFile(this.storePath, JSON.stringify(this.store, null, 2));
+        await atomicWritePrivate(this.storePath, JSON.stringify(this.store, null, 2));
     }
 
     private normalizeNumber(input: string): string {
@@ -177,12 +196,17 @@ export class RecentsService {
         return timestamp < 1_000_000_000_000 ? timestamp * 1000 : timestamp;
     }
 
-    async recordMessage(input: RecentsMessageInput) {
+    recordMessage(input: RecentsMessageInput): Promise<void> {
+        return this.writes.run(() => this.recordMessageSerialized(input));
+    }
+
+    private async recordMessageSerialized(input: RecentsMessageInput) {
+        if (this.storageError) throw this.storageError;
         const senderNumber = this.normalizeNumber(input.senderNumber);
         if (!senderNumber) return;
 
         const normalizedTimestamp = this.normalizeTimestamp(input.timestamp);
-        const normalizedText = this.stripSpecialCharacters(input.text);
+        const normalizedText = this.stripSpecialCharacters(input.text.slice(0, 16384));
         if (!normalizedText) return;
 
         const existing = this.store.messagesBySender[senderNumber] ?? [];
@@ -205,13 +229,14 @@ export class RecentsService {
             .sort((left, right) => left.timestamp - right.timestamp)
             .slice(-MAX_MESSAGES_PER_CONVERSATION);
 
+        const latest = this.store.messagesBySender[senderNumber].at(-1)!;
         const existingConversation = this.store.conversations.find(conversation => conversation.senderNumber === senderNumber);
         const summary: RecentConversationSummary = {
             senderNumber,
             senderName: input.senderName ?? existingConversation?.senderName,
-            lastMessagePreview: this.buildPreview(normalizedText),
-            lastMessageTime: normalizedTimestamp,
-            lastMessageDirection: input.direction,
+            lastMessagePreview: this.buildPreview(latest.text),
+            lastMessageTime: latest.timestamp,
+            lastMessageDirection: latest.direction,
             messageCount: this.store.messagesBySender[senderNumber].length,
             isAllowed: this.sessionManager.isConversationAllowed(senderNumber)
         };
@@ -221,15 +246,21 @@ export class RecentsService {
             ...this.store.conversations.filter(item => item.senderNumber !== senderNumber)
         ]).slice(0, MAX_RECENT_CONVERSATIONS);
 
+        const retained = new Set(this.store.conversations.map(conversation => conversation.senderNumber));
+        for (const key of Object.keys(this.store.messagesBySender)) if (!retained.has(key)) delete this.store.messagesBySender[key];
         await this.persistStore();
     }
 
     async getRecentConversations(): Promise<RecentConversationSummary[]> {
+        if (this.storageError) throw this.storageError;
+        await this.drain();
         this.rebuildConversationState();
         return [...this.store.conversations];
     }
 
     async getConversationHistory(senderNumber: string): Promise<RecentConversationMessage[]> {
+        if (this.storageError) throw this.storageError;
+        await this.drain();
         const normalizedNumber = this.normalizeNumber(senderNumber);
         const messages = this.store.messagesBySender[normalizedNumber] ?? [];
         return [...messages]

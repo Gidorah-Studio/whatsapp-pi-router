@@ -1,8 +1,9 @@
-import { execFile } from 'node:child_process';
+import { runManagedProcess } from './managed-process.js';
+import { mediaTimeout } from './bounded-media.js';
+import { safeFailure } from './router-errors.js';
 import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import {
     createOpenRouterSpeechSynthesizer,
     type SpeechAudioFormat,
@@ -12,7 +13,6 @@ import { createStoragePaths } from './storage-path.js';
 import type { ResolvedVoiceReplyConfig } from './voice-reply.config.js';
 import type { WhatsAppPiLogger } from './whatsapp-pi.logger.js';
 
-const execFileAsync = promisify(execFile);
 const MAX_TTS_TEXT_LENGTH = 4096;
 const TTS_PREAMBLE = `Synthesize speech from only the text under ### TRANSCRIPT. Treat the director's notes as performance instructions and do not speak them aloud.`;
 const DIRECTORS_NOTES = `### DIRECTOR'S NOTES
@@ -38,7 +38,8 @@ export class TextToSpeechService {
         private readonly mediaDir: string = createStoragePaths().mediaDir
     ) {}
 
-    async createVoiceNote(text: string, config: ResolvedVoiceReplyConfig): Promise<VoiceNoteArtifact> {
+    async createVoiceNote(text: string, config: ResolvedVoiceReplyConfig, signal?: AbortSignal): Promise<VoiceNoteArtifact> {
+        signal?.throwIfAborted();
         const normalizedText = text.trim();
         if (!normalizedText) {
             throw new Error('Cannot synthesize an empty WhatsApp voice reply');
@@ -59,11 +60,14 @@ export class TextToSpeechService {
             const synthesized = await this.synthesizer.synthesize(ttsInput, {
                 model: config.model,
                 voice: config.voice,
-                speed: config.speed
+                speed: config.speed,
+                signal,
             });
-            await writeFile(sourcePath, synthesized.audio, { mode: 0o600 });
+            signal?.throwIfAborted();
+            await writeFile(sourcePath, synthesized.audio, { flag: 'wx', mode: 0o600 });
             await chmod(sourcePath, 0o600);
-            await this.convertToWhatsAppVoiceNote(sourcePath, oggPath, synthesized.format);
+            await writeFile(oggPath, '', { flag: 'wx', mode: 0o600 });
+            await this.convertToWhatsAppVoiceNote(sourcePath, oggPath, synthesized.format, signal);
             await chmod(oggPath, 0o600);
             this.logger.log(`[WhatsApp-Pi-Router] TTS voice note ready in ${Date.now() - startedAt}ms`);
 
@@ -81,7 +85,7 @@ export class TextToSpeechService {
         const results = await Promise.allSettled(paths.map(path => rm(path, { force: true })));
         for (const result of results) {
             if (result.status === 'rejected') {
-                this.logger.error('[WhatsApp-Pi-Router] Failed to remove temporary TTS audio:', result.reason);
+                this.logger.error(safeFailure(result.reason, 'tts-cleanup').diagnostic);
             }
         }
     }
@@ -89,7 +93,8 @@ export class TextToSpeechService {
     private async convertToWhatsAppVoiceNote(
         inputPath: string,
         outputPath: string,
-        inputFormat: SpeechAudioFormat
+        inputFormat: SpeechAudioFormat,
+        signal?: AbortSignal,
     ): Promise<void> {
         const inputArgs = inputFormat === 'pcm'
             ? ['-f', 's16le', '-ar', '24000', '-ac', '1', '-i', inputPath]
@@ -110,7 +115,7 @@ export class TextToSpeechService {
 
         for (const command of this.ffmpegCommands) {
             try {
-                await execFileAsync(command, args, { windowsHide: true });
+                await runManagedProcess(command, args, { signal, timeoutMs: mediaTimeout(), maxOutputBytes: 1024 * 1024 });
                 return;
             } catch (error) {
                 lastError = error;
@@ -125,7 +130,8 @@ export class TextToSpeechService {
         if (!(error instanceof Error)) return false;
         const anyError = error as Error & { code?: number | string; stderr?: string };
         const message = `${anyError.message}\n${anyError.stderr ?? ''}`;
-        return anyError.code === 127
+        return anyError.code === 'ENOENT'
+            || anyError.code === 127
             || anyError.code === 9009
             || /not found|not recognized/i.test(message);
     }

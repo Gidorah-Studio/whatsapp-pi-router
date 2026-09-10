@@ -24,13 +24,14 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test:build": "node -e \"require('node:fs').rmSync('.test-dist',{recursive:true,force:true})\" && tsc -p tsconfig.test.json",
-    "test": "npm run test:build && node --test .test-dist/tests/*.test.js"
+    "test:build": "node -e \"require('node:fs').rmSync('.test-dist',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node -e \"require('node:fs').copyFileSync('src/services/media-worker.mjs','.test-dist/src/services/media-worker.mjs')\"",
+    "test": "npm run test:build && node scripts/run-tests.mjs"
   },
   "dependencies": {
     "@llamaindex/liteparse": "^1.5.3",
     "@sinclair/typebox": "^0.27.10",
     "baileys": "^7.0.0-rc13",
+    "jiti": "2.7.0",
     "pino": "^10.3.1",
     "qrcode-terminal": "^0.12.0",
     "whisper-cpp-node": "^0.2.12"
