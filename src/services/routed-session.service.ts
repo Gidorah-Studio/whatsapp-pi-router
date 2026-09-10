@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
+import { ensurePrivateDirectory } from './private-storage.js';
 import { join } from 'node:path';
 import { SessionManager as PiSessionManager } from '@earendil-works/pi-coding-agent';
 import { createStoragePaths } from './storage-path.js';
@@ -30,7 +30,7 @@ export function createRoutedSessionRoute(remoteJid: string): RoutedSessionRoute 
 
 export async function resolveRoutedSessionLaunch(remoteJid: string, cwd: string): Promise<RoutedSessionLaunch> {
     const route = createRoutedSessionRoute(remoteJid);
-    await mkdir(route.directory, { recursive: true });
+    await ensurePrivateDirectory(route.directory);
 
     const routedSessions = await PiSessionManager.list(cwd, route.directory);
     if (routedSessions.length > 0) {

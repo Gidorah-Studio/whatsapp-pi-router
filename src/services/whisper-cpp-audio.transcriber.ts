@@ -1,8 +1,6 @@
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { createWriteStream } from 'node:fs';
-import { mkdir, stat, unlink } from 'node:fs/promises';
-import https from 'node:https';
+import { mkdir, mkdtemp, open, rename, rm, stat } from 'node:fs/promises';
 import { createStoragePaths } from './storage-path.js';
 import type { WhatsAppPiLogger } from './whatsapp-pi.logger.js';
 
@@ -51,52 +49,25 @@ function getModelPath(): string {
 }
 
 async function downloadFile(url: string, targetPath: string): Promise<void> {
-    await mkdir(dirname(targetPath), { recursive: true });
-    await unlink(targetPath).catch(() => undefined);
-
-    await new Promise<void>((resolve, reject) => {
-        const file = createWriteStream(targetPath);
-        const cleanup = () => void unlink(targetPath).catch(() => undefined);
-        const request = https.get(url, (response) => {
-            if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-                const nextUrl = new URL(response.headers.location, url).toString();
-                response.resume();
-                file.close(cleanup);
-                downloadFile(nextUrl, targetPath).then(resolve).catch(reject);
-                return;
-            }
-
-            if (response.statusCode !== 200) {
-                file.close(cleanup);
-                reject(new Error(`Model download failed: HTTP ${response.statusCode}`));
-                return;
-            }
-
-            response.pipe(file);
-            file.once('finish', () => {
-                file.close((error) => {
-                    if (error) {
-                        cleanup();
-                        reject(error);
-                        return;
-                    }
-
-                    resolve();
-                });
-            });
-        });
-
-        request.on('error', (error) => {
-            file.close(cleanup);
-            reject(error);
-        });
-
-        file.on('error', (error) => {
-            request.destroy(error);
-            cleanup();
-            reject(error);
-        });
-    });
+    const response = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+    if (!response.ok || !response.body) throw new Error('Model download failed');
+    const reader = response.body.getReader();
+    const file = await open(targetPath, 'wx', 0o600);
+    let bytes = 0;
+    try {
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            bytes += value.length;
+            if (bytes > 512 * 1024 * 1024) throw new Error('Model download exceeded limit');
+            await file.writeFile(value);
+        }
+        if (!bytes) throw new Error('Empty model download');
+        await file.sync();
+    } finally {
+        await reader.cancel().catch(() => undefined);
+        await file.close();
+    }
 }
 
 async function ensureWhisperModel(logger: AudioLogger): Promise<string> {
@@ -112,8 +83,15 @@ async function ensureWhisperModel(logger: AudioLogger): Promise<string> {
     }
 
     logger.log(`[WhatsApp-Pi] Whisper.cpp model download: ${modelPath}`);
-    await downloadFile(DEFAULT_MODEL_URL, modelPath);
-    return modelPath;
+    await mkdir(dirname(modelPath), { recursive: true, mode: 0o700 });
+    const staging = await mkdtemp(join(dirname(modelPath), 'download-'));
+    try {
+        const temporaryModel = join(staging, MODEL_FILENAME);
+        await downloadFile(DEFAULT_MODEL_URL, temporaryModel);
+        // Concurrent workers see either a complete model or no model, never a partial download.
+        await rename(temporaryModel, modelPath);
+        return modelPath;
+    } finally { await rm(staging, { recursive: true, force: true }); }
 }
 
 async function createContext(modelPath: string, logger: AudioLogger): Promise<WhisperContext> {

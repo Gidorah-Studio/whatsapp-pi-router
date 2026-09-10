@@ -1,6 +1,9 @@
-import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
+import { InboundLedger } from './services/inbound-ledger.js';
+import { ConversationScheduler } from './services/conversation-scheduler.js';
+import { runManagedProcess } from './services/managed-process.js';
+import { createIncomingMediaTurn } from './services/incoming-media-storage.js';
+import { positiveInteger, RouterError, safeFailure } from './services/router-errors.js';
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -131,17 +134,19 @@ interface RoutedPiTurnResult {
     cleanup(): Promise<void>;
 }
 
-const runPiForConversation = async (params: {
+export const runPiForConversation = async (params: {
     sessionLaunch: RoutedSessionLaunch;
     prompt: string;
     cwd: string;
     imageBuffer?: Buffer;
     imageMimeType?: string;
     childPiConfig: ResolvedChildPiConfig;
+    signal: AbortSignal;
+    mediaDir?: string;
 }): Promise<RoutedPiTurnResult> => {
     const piBin = process.env.WHATSAPP_PI_ROUTER_PI_BIN || 'pi';
     const args = [...params.sessionLaunch.args];
-    const handoffDir = await createImageHandoffDirectory(createStoragePaths().mediaDir);
+    const handoffDir = await createImageHandoffDirectory(params.mediaDir ?? createStoragePaths().mediaDir);
 
     try {
         if (params.childPiConfig.model) {
@@ -158,48 +163,22 @@ const runPiForConversation = async (params: {
 
         if (params.imageBuffer && params.imageMimeType) {
             const ext = params.imageMimeType.includes('png') ? 'png' : params.imageMimeType.includes('webp') ? 'webp' : 'jpg';
-            const dir = join(tmpdir(), 'whatsapp-pi-router');
-            await mkdir(dir, { recursive: true });
-            const imagePath = join(dir, `${params.sessionLaunch.route.key}-${Date.now()}.${ext}`);
-            await writeFile(imagePath, params.imageBuffer);
+            const imagePath = join(handoffDir, `incoming.${ext}`);
+            await writeFile(imagePath, params.imageBuffer, { flag: 'wx', mode: 0o600 });
             args.push(`@${imagePath}`);
         }
 
-        args.push(params.prompt);
-
-        const text = await new Promise<string>((resolve, reject) => {
-            const child = spawn(piBin, args, {
-                cwd: params.cwd,
-                env: {
-                    ...process.env,
-                    WHATSAPP_PI_ROUTER_CHILD: '1',
-                    WHATSAPP_PI_ROUTER_IMAGE_HANDOFF_DIR: handoffDir,
-                },
-                stdio: ['ignore', 'pipe', 'pipe'],
-            });
-            let stdout = '';
-            let stderr = '';
-            const timer = setTimeout(() => {
-                child.kill('SIGTERM');
-                reject(new Error('Timed out waiting for Pi response'));
-            }, Number(process.env.WHATSAPP_PI_ROUTER_TIMEOUT_MS || 10 * 60 * 1000));
-
-            child.stdout.setEncoding('utf8');
-            child.stderr.setEncoding('utf8');
-            child.stdout.on('data', (chunk) => { stdout += chunk; });
-            child.stderr.on('data', (chunk) => { stderr += chunk; });
-            child.on('error', (error) => {
-                clearTimeout(timer);
-                reject(error);
-            });
-            child.on('close', (code) => {
-                clearTimeout(timer);
-                if (code === 0) {
-                    resolve(stdout.trim());
-                } else {
-                    reject(new Error(stderr.trim() || `pi exited with code ${code}`));
-                }
-            });
+        const text = await runManagedProcess(piBin, args, {
+            cwd: params.cwd,
+            env: {
+                ...process.env,
+                WHATSAPP_PI_ROUTER_CHILD: '1',
+                WHATSAPP_PI_ROUTER_IMAGE_HANDOFF_DIR: handoffDir,
+            },
+            input: params.prompt,
+            signal: params.signal,
+            timeoutMs: positiveInteger(process.env.WHATSAPP_PI_ROUTER_TIMEOUT_MS, 10 * 60 * 1000),
+            maxOutputBytes: positiveInteger(process.env.WHATSAPP_ROUTER_CHILD_MAX_OUTPUT_BYTES, 1024 * 1024, 16 * 1024 * 1024),
         });
         const image = await loadImageHandoff(handoffDir);
 
@@ -238,7 +217,13 @@ export default function (pi: ExtensionAPI) {
 
     const sessionManager = new SessionManager();
     const connectionJournal = new ConnectionEventJournal();
-    const whatsappService = new WhatsAppService(sessionManager, connectionJournal);
+    const whatsappService = new WhatsAppService(sessionManager, connectionJournal,
+        new InboundLedger(join(createStoragePaths().root, 'inbound-ledger.json')));
+    const conversationScheduler = new ConversationScheduler(
+        positiveInteger(process.env.WHATSAPP_ROUTER_MAX_CONCURRENT_TURNS, 4, 32),
+        positiveInteger(process.env.WHATSAPP_ROUTER_MAX_CHAT_BACKLOG, 10, 1000),
+        positiveInteger(process.env.WHATSAPP_ROUTER_MAX_BACKLOG, 100, 10000),
+    );
     const recentsService = new RecentsService(sessionManager);
     const identityMapService = new IdentityMapService();
     const logger = new WhatsAppPiLogger(false);
@@ -375,8 +360,13 @@ export default function (pi: ExtensionAPI) {
         stopPromise = (async () => {
             try {
                 outboundQueueService.stop();
-                if (routerActive) {
-                    await whatsappService.stop();
+                try {
+                    if (routerActive) await whatsappService.stop();
+                } finally {
+                    // Even a failed socket stop must not release auth ownership while children write.
+                    await conversationScheduler.stop();
+                    await whatsappService.drainIncoming();
+                    await recentsService.drain();
                 }
                 await whatsappService.recordLifecycleEvent({
                     type: 'instance-lock-released',
@@ -580,6 +570,11 @@ export default function (pi: ExtensionAPI) {
         };
     };
 
+    const recordDeliveredReply = async (input: Parameters<RecentsService['recordMessage']>[0]) => {
+        try { await recentsService.recordMessage(input); }
+        catch (error) { logger.error(safeFailure(error, 'delivered-reply-history').diagnostic); }
+    };
+
     const sendRoutedReply = async (params: {
         replyJid: string;
         conversationId: string;
@@ -587,7 +582,9 @@ export default function (pi: ExtensionAPI) {
         image?: RoutedImageHandoff;
         incomingWasVoice: boolean;
         voiceConfig: ResolvedVoiceReplyConfig;
+        signal: AbortSignal;
     }): Promise<void> => {
+        params.signal.throwIfAborted();
         const plan = planVoiceReply(params.rawReply, params.voiceConfig.mode, params.incomingWasVoice);
         const text = params.image
             ? (params.image.caption || 'I created the image, but WhatsApp could not deliver it.')
@@ -603,7 +600,7 @@ export default function (pi: ExtensionAPI) {
                 );
                 if (imageResult.success) {
                     try {
-                        await recentsService.recordMessage({
+                        await recordDeliveredReply({
                             messageId: imageResult.messageId ?? `pi-router-image-${Date.now()}`,
                             senderNumber: params.conversationId,
                             senderName: 'Pi',
@@ -613,24 +610,25 @@ export default function (pi: ExtensionAPI) {
                             timestamp: Date.now(),
                         });
                     } catch (error) {
-                        logger.error('[WhatsApp-Pi-Router] Image sent but failed to record it in recents:', error);
+                        logger.error(safeFailure(error, 'image-history').diagnostic);
                     }
                     logger.log(`[WhatsApp-Pi-Router] Sent image reply to ${params.replyJid}`);
                     return;
                 }
-                logger.error(`[WhatsApp-Pi-Router] Image delivery failed; falling back to text: ${imageResult.error ?? 'unknown error'}`);
+                logger.error(safeFailure(new Error(), 'image-delivery').diagnostic);
             } catch (error) {
-                logger.error(`[WhatsApp-Pi-Router] Image delivery failed; falling back to text: ${error instanceof Error ? error.message : String(error)}`);
+                logger.error(safeFailure(error, 'image-delivery').diagnostic);
             }
         }
 
         if (plan.useVoice && !params.image) {
             let artifact: Awaited<ReturnType<TextToSpeechService['createVoiceNote']>> | undefined;
             try {
-                artifact = await textToSpeechService.createVoiceNote(text, params.voiceConfig);
+                artifact = await textToSpeechService.createVoiceNote(text, params.voiceConfig, params.signal);
+                params.signal.throwIfAborted();
                 const voiceResult = await whatsappService.sendVoiceMessage(params.replyJid, artifact.path);
                 if (voiceResult.success) {
-                    await recentsService.recordMessage({
+                    await recordDeliveredReply({
                         messageId: voiceResult.messageId ?? `pi-router-voice-${Date.now()}`,
                         senderNumber: params.conversationId,
                         senderName: 'Pi',
@@ -642,25 +640,27 @@ export default function (pi: ExtensionAPI) {
                     logger.log(`[WhatsApp-Pi-Router] Sent ${plan.reason} voice reply to ${params.replyJid}`);
                     return;
                 }
-                logger.error(`[WhatsApp-Pi-Router] Voice delivery failed; falling back to text: ${voiceResult.error ?? 'unknown error'}`);
+                logger.error(safeFailure(new Error(), 'voice-delivery').diagnostic);
             } catch (error) {
-                logger.error(`[WhatsApp-Pi-Router] TTS failed; falling back to text: ${error instanceof Error ? error.message : String(error)}`);
+                params.signal.throwIfAborted();
+                logger.error(safeFailure(error, 'tts').diagnostic);
             } finally {
                 if (artifact) {
                     try {
                         await artifact.cleanup();
                     } catch (error) {
-                        logger.error('[WhatsApp-Pi-Router] Failed to clean up TTS files:', error);
+                        logger.error(safeFailure(error, 'tts-cleanup').diagnostic);
                     }
                 }
             }
         }
 
+        params.signal.throwIfAborted();
         const textResult = await whatsappService.sendMessage(params.replyJid, text);
         if (!textResult.success) {
             throw new Error(textResult.error ?? 'WhatsApp text fallback failed');
         }
-        await recentsService.recordMessage({
+        await recordDeliveredReply({
             messageId: textResult.messageId ?? `pi-router-${Date.now()}`,
             senderNumber: params.conversationId,
             senderName: 'Pi',
@@ -669,25 +669,6 @@ export default function (pi: ExtensionAPI) {
             direction: 'outgoing',
             timestamp: Date.now(),
         });
-    };
-
-    const conversationTurnQueues = new Map<string, Promise<unknown>>();
-    const enqueueConversationTurn = async <T>(conversationKey: string, task: () => Promise<T>): Promise<T> => {
-        const previous = conversationTurnQueues.get(conversationKey) ?? Promise.resolve();
-        const current = previous
-            .catch((error) => {
-                logger.error(`[WhatsApp-Pi-Router] Previous queued turn failed for ${conversationKey}:`, error);
-            })
-            .then(task);
-        conversationTurnQueues.set(conversationKey, current);
-
-        try {
-            return await current;
-        } finally {
-            if (conversationTurnQueues.get(conversationKey) === current) {
-                conversationTurnQueues.delete(conversationKey);
-            }
-        }
     };
 
     // Handle incoming messages by injecting them as user prompts
@@ -712,74 +693,55 @@ export default function (pi: ExtensionAPI) {
         const participantJid = isGroup ? (msg.key.participantAlt || msg.key.participant) : (phoneJid ?? lidJid ?? remoteJid);
         const participant = participantJid?.split('@')[0] || 'unknown';
         const sender = (phoneJid ?? lidJid ?? remoteJid).split('@')[0] || "unknown";
-        const pushName = msg.pushName || "WhatsApp User";
+        const pushName = (msg.pushName || "WhatsApp User").slice(0, 256);
 
-        // Mark as read on the actual incoming chat key, then type in the reply thread.
-        if (msg.key.id) {
-            whatsappService.markRead(remoteJid, msg.key.id, msg.key.fromMe);
-            whatsappService.sendPresence(replyJid, 'composing');
-        }
+        return conversationScheduler.enqueue(replyJid, async (signal) => {
+            signal.throwIfAborted();
+            const mediaTurn = await createIncomingMediaTurn(replyJid);
+            try {
+                // All preprocessing is inside the FIFO, so slow audio cannot be overtaken.
+                if (msg.key.id) {
+                    await whatsappService.markRead(remoteJid, msg.key.id, msg.key.fromMe);
+                    await whatsappService.sendPresence(replyJid, 'composing');
+                }
+                toolSentToJid = null;
+                const resolved = extractIncomingText(msg.message);
+                if (resolved.kind === 'system') return;
+                if (resolved.text.length > 65536) throw new RouterError('media-limit');
+                const { text, imageBuffer, imageMimeType } = await incomingMediaService.process(resolved, pushName, mediaTurn, signal);
+                if (text.length > 65536) throw new RouterError('media-limit');
+                const messageHeader = isGroup
+                    ? `Message from ${pushName} (${participant}) in group ${remoteJid}:`
+                    : `Message from ${pushName} (${sender}):`;
+                logger.log('[WhatsApp-Pi-Router] Processing admitted message.');
 
-        // Reset tool-sent flag for this new incoming message
-        toolSentToJid = null;
+                if (!isGroup && lidJid && phoneJid) {
+                    await Promise.all([
+                        whatsappService.storeLidPnMapping(lidJid, phoneJid),
+                        identityMapService.recordLidPnMapping(lidJid, phoneJid),
+                    ]);
+                }
+                if (text.trim().toLowerCase().startsWith('/compact')) {
+                    await whatsappService.sendMessage(replyJid, 'Per-conversation sessions are compacted by their own Pi runs.');
+                    return;
+                }
+                if (text.trim().toLowerCase().startsWith('/abort')) {
+                    await whatsappService.sendMessage(replyJid, 'Stopping a turn from WhatsApp is not supported yet.');
+                    return;
+                }
 
-        const resolved = extractIncomingText(msg.message);
-        if (resolved.kind === 'system') {
-            logger.log(`[WhatsApp-Pi] ${pushName} (${sender}): ${resolved.text}`);
-            return;
-        }
-
-        const { text, imageBuffer, imageMimeType } = await incomingMediaService.process(resolved, pushName);
-
-        // Format message header with group context when applicable
-        const messageHeader = isGroup
-            ? `Message from ${pushName} (${participant}) in group ${remoteJid}:`
-            : `Message from ${pushName} (${sender}):`;
-
-        logger.log(`[WhatsApp-Pi] ${messageHeader} ${text}`);
-
-        if (!isGroup && lidJid && phoneJid) {
-            await Promise.all([
-                whatsappService.storeLidPnMapping(lidJid, phoneJid),
-                identityMapService.recordLidPnMapping(lidJid, phoneJid),
-            ]);
-        }
-
-        // Handle commands before dispatching to the routed child Pi session.
-        if (text.trim().toLowerCase().startsWith('/compact')) {
-            logger.log(`[WhatsApp-Pi] Session compact requested by ${pushName}.`);
-            await whatsappService.sendMessage(replyJid, "Per-conversation sessions are compacted by their own Pi runs. ✅");
-            return;
-        }
-
-        if (text.trim().toLowerCase().startsWith('/abort')) {
-            logger.log(`[WhatsApp-Pi] Abort requested by ${pushName}.`);
-            await whatsappService.sendMessage(replyJid, "There is no active routed Pi turn to abort from WhatsApp yet. ✅");
-            return;
-        }
-
-        const conversationId = toConversationId(replyJid);
-        if (!isGroup) {
-            await identityMapService.recordIncomingIdentity({
-                conversationId,
-                whatsappJid: replyJid,
-                alternateJid,
-                lidJid,
-                phoneJid,
-                pushName,
-                addressingMode: msg.key.addressingMode,
-            });
-        }
-        let voiceConfig = getDefaultResolvedVoiceReplyConfig();
-        try {
-            voiceConfig = await loadResolvedVoiceReplyConfig();
-        } catch (error) {
-            logger.error('[WhatsApp-Pi-Router] Invalid voice reply settings; using text replies:', error);
-        }
-        const incomingWasVoice = resolved.kind === 'audio';
-        try {
-            const cwd = _ctx?.cwd ?? process.cwd();
-            await enqueueConversationTurn(replyJid, async () => {
+                const conversationId = toConversationId(replyJid);
+                if (!isGroup) {
+                    await identityMapService.recordIncomingIdentity({
+                        conversationId, whatsappJid: replyJid, alternateJid, lidJid, phoneJid,
+                        pushName, addressingMode: msg.key.addressingMode,
+                    });
+                }
+                let voiceConfig = getDefaultResolvedVoiceReplyConfig();
+                try { voiceConfig = await loadResolvedVoiceReplyConfig(); }
+                catch (error) { logger.error(safeFailure(error, 'voice-settings').diagnostic); }
+                const incomingWasVoice = resolved.kind === 'audio';
+                const cwd = _ctx?.cwd ?? process.cwd();
                 const identity = isGroup ? undefined : await identityMapService.getResolvedIdentity(conversationId);
                 const prompt = buildPrompt({
                     messageHeader, text, remoteJid, replyJid, alternateJid,
@@ -796,9 +758,12 @@ export default function (pi: ExtensionAPI) {
                     prompt,
                     cwd,
                     childPiConfig,
+                    signal,
+                    mediaDir: mediaTurn.temporary,
                     ...(imageBuffer && imageMimeType ? { imageBuffer, imageMimeType } : {}),
                 });
                 try {
+                    signal.throwIfAborted();
                     await sendRoutedReply({
                         replyJid,
                         conversationId,
@@ -806,20 +771,27 @@ export default function (pi: ExtensionAPI) {
                         ...(turnResult.image ? { image: turnResult.image } : {}),
                         incomingWasVoice,
                         voiceConfig,
+                        signal,
                     });
                 } finally {
                     await turnResult.cleanup().catch(error => {
-                        logger.error('[WhatsApp-Pi-Router] Failed to clean up image handoff files:', error);
+                        logger.error(safeFailure(error, 'image-handoff-cleanup').diagnostic);
                     });
                 }
-            });
-        } catch (error) {
-            logger.error('[WhatsApp-Pi-Router] routed Pi reply failed:', error);
-            await whatsappService.sendMessage(
-                replyJid,
-                `Sorry, the routed Pi session failed: ${error instanceof Error ? error.message : String(error)}`,
-            );
-        }
+            } finally {
+                await mediaTurn.cleanup().catch(error => logger.error(safeFailure(error, 'incoming-media-cleanup').diagnostic));
+                await whatsappService.sendPresence(replyJid, 'paused');
+            }
+        }).catch(async error => {
+            const failure = safeFailure(error, 'routed-turn');
+            logger.error(failure.diagnostic);
+            if (!(error instanceof RouterError && error.kind === 'stopped') &&
+                !(error instanceof Error && error.name === 'AbortError')) {
+                try { await whatsappService.sendMessage(replyJid, failure.message); }
+                catch (sendError) { logger.error(safeFailure(sendError, 'failure-notice').diagnostic); }
+            }
+            throw error;
+        });
     });
 
     // Register sanitized connection diagnostics for the operator Pi. Routed

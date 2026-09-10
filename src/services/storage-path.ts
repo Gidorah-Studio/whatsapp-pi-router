@@ -1,5 +1,6 @@
 import { access, mkdir, readdir, cp, stat } from 'fs/promises';
 import { homedir } from 'os';
+import { ensurePrivateDirectory } from './private-storage.js';
 import { join } from 'path';
 
 export function getDefaultStorageRoot(): string {
@@ -51,10 +52,10 @@ export function createStoragePaths(root = getDefaultStorageRoot(), legacyRoot = 
 }
 
 export async function ensureStorageDirectories(paths: Pick<StoragePaths, 'root' | 'authStateDir' | 'recentsDir' | 'logDir'>) {
-    await mkdir(paths.root, { recursive: true });
-    await mkdir(paths.authStateDir, { recursive: true });
-    await mkdir(paths.recentsDir, { recursive: true });
-    await mkdir(paths.logDir, { recursive: true });
+    await ensurePrivateDirectory(paths.root);
+    await ensurePrivateDirectory(paths.authStateDir);
+    await ensurePrivateDirectory(paths.recentsDir);
+    await ensurePrivateDirectory(paths.logDir);
 }
 
 export async function pathExists(targetPath: string): Promise<boolean> {

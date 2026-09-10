@@ -1,197 +1,74 @@
-import { downloadContentFromMessage } from 'baileys';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { writeFile, mkdir } from 'node:fs/promises';
+import { writeFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
-import { createStoragePaths } from './storage-path.js';
 import { WhatsAppPiLogger } from './whatsapp-pi.logger.js';
 import { createOpenRouterAudioTranscriber } from './openrouter-audio.transcriber.js';
 import { tryCreateWhisperCppAudioTranscriber, type AudioTranscriber } from './whisper-cpp-audio.transcriber.js';
-import { t } from '../i18n.js';
+import { downloadBoundedMedia, mediaTimeout } from './bounded-media.js';
+import { createIncomingMediaTurn, type IncomingMediaTurn } from './incoming-media-storage.js';
+import { runMediaWorker } from './media-worker.js';
+import { RouterError, safeFailure } from './router-errors.js';
 
 const execFileAsync = promisify(execFile);
-
 type AudioLogger = Pick<WhatsAppPiLogger, 'log' | 'error'>;
-type AudioPhase = 'download' | 'write' | 'convert' | 'whisper' | 'total';
 
 export class AudioService {
-    private readonly mediaDir = createStoragePaths().mediaDir;
-    private readonly logger: AudioLogger;
-    private readonly audioTranscriber: AudioTranscriber | null;
-    private readonly ffmpegCommands = process.platform === 'win32' ? ['ffmpeg', 'ffmpeg.exe'] : ['ffmpeg'];
+    constructor(
+        private readonly logger: AudioLogger = new WhatsAppPiLogger(false),
+        private readonly audioTranscriber?: AudioTranscriber | null,
+    ) {}
 
-    constructor(logger: AudioLogger = new WhatsAppPiLogger(false), audioTranscriber?: AudioTranscriber | null) {
-        this.logger = logger;
-        this.audioTranscriber = audioTranscriber === undefined
-            ? createConfiguredAudioTranscriber(logger)
-            : audioTranscriber;
-
-        if (!existsSync(this.mediaDir)) {
-            mkdir(this.mediaDir, { recursive: true }).catch(() => {});
-        }
-    }
-
-    async transcribe(audioMessage: any): Promise<string> {
-        const totalStart = Date.now();
-
+    async transcribe(audioMessage: any, turn?: IncomingMediaTurn, signal?: AbortSignal): Promise<string> {
+        const owned = turn ?? await createIncomingMediaTurn('standalone-audio');
         try {
-            const filename = `audio_${Date.now()}`;
-            const inputPath = join(this.mediaDir, `${filename}.ogg`);
-            const wavPath = join(this.mediaDir, `${filename}.wav`);
-
-            const buffer = await this.measurePhase('download', async () => {
-                const stream = await downloadContentFromMessage(audioMessage, 'audio');
-                let output = Buffer.from([]);
-
-                for await (const chunk of stream) {
-                    output = Buffer.concat([output, chunk]);
-                }
-
-                return output;
-            });
-
-            await this.measurePhase('write', async () => {
-                await writeFile(inputPath, buffer);
-            });
-
-            await this.measurePhase('convert', async () => {
-                await this.convertToWav(inputPath, wavPath);
-            });
-
-            const audioTranscriber = this.audioTranscriber;
-            if (!audioTranscriber) {
-                throw new Error('No audio transcription provider available');
-            }
-
-            return await this.measurePhase('whisper', async () => {
-                const transcription = await audioTranscriber.transcribe(wavPath);
-                const text = String(transcription ?? '').trim();
-                return text || t('audio.emptyTranscription');
-            });
-        } catch (error) {
-            console.error(t('audio.transcriptionError'), error);
-            return t('audio.transcriptionErrorResult', { error: error instanceof Error ? error.message : String(error) });
+            const input = join(owned.temporary, 'audio.ogg');
+            const buffer = await downloadBoundedMedia(audioMessage, 'audio', signal);
+            await writeFile(input, buffer, { mode: 0o600, flag: 'wx' });
+            return await runMediaWorker('audio', input, signal);
         } finally {
-            this.logger.log(t('audio.phaseTiming', { phase: t('audio.phase.total'), duration: Date.now() - totalStart }));
+            if (!turn) await owned.cleanup();
         }
     }
 
-    private async measurePhase<T>(phase: Exclude<AudioPhase, 'total'>, action: () => Promise<T>): Promise<T> {
-        const start = Date.now();
-
-        try {
-            return await action();
-        } finally {
-            this.logger.log(t('audio.phaseTiming', { phase: this.getPhaseLabel(phase), duration: Date.now() - start }));
-        }
-    }
-
-    private getPhaseLabel(phase: Exclude<AudioPhase, 'total'>): string {
-        switch (phase) {
-            case 'download':
-                return t('audio.phase.download');
-            case 'write':
-                return t('audio.phase.write');
-            case 'convert':
-                return t('audio.phase.convert');
-            case 'whisper':
-                return t('audio.phase.whisper');
-        }
-    }
-
-    private async convertToWav(inputPath: string, outputPath: string): Promise<void> {
-        const args = ['-y', '-i', inputPath, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', outputPath];
-        let lastError: unknown;
-
-        for (const command of this.ffmpegCommands) {
-            try {
-                await execFileAsync(command, args, { windowsHide: true });
-                return;
-            } catch (error) {
-                lastError = error;
-                if (!this.isMissingFfmpegCommand(error)) {
-                    throw error;
-                }
-            }
-        }
-
-        throw lastError instanceof Error ? lastError : new Error('ffmpeg unavailable');
-    }
-
-    private isMissingFfmpegCommand(error: unknown): boolean {
-        if (!(error instanceof Error)) {
-            return false;
-        }
-
-        const anyError = error as Error & { code?: number | string; stderr?: string };
-        const message = `${anyError.message}\n${anyError.stderr ?? ''}`;
-
-        return anyError.code === 127
-            || anyError.code === 9009
-            || /not found|not recognized/i.test(message);
+    /** Called inside the killable media subprocess, never on the router's event loop. */
+    async transcribeFile(input: string): Promise<string> {
+        const wav = `${input}.wav`;
+        // Bound decoded duration and output, not just compressed upload bytes.
+        await writeFile(wav, '', { mode: 0o600, flag: 'wx' });
+        await execFileAsync('ffmpeg', [
+            '-y', '-i', input, '-t', '600', '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wav,
+        ], { windowsHide: true, timeout: mediaTimeout(), killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 });
+        if ((await stat(wav)).size >= 600 * 16000 * 2) throw new RouterError('media-limit');
+        const transcriber = this.audioTranscriber === undefined ? createConfiguredAudioTranscriber(this.logger) : this.audioTranscriber;
+        if (!transcriber) throw new Error('No audio transcription provider available');
+        const text = String(await transcriber.transcribe(wav)).trim();
+        if (!text) throw new Error('Empty transcription');
+        return text;
     }
 }
 
 function createConfiguredAudioTranscriber(logger: AudioLogger): AudioTranscriber | null {
     const provider = (process.env.STT_PROVIDER || 'local').trim().toLowerCase();
-
     if (provider === 'openrouter') {
         const localFallback = tryCreateWhisperCppAudioTranscriber(logger);
         try {
-            const openRouterTranscriber = createOpenRouterAudioTranscriber(logger);
-            if (!localFallback) {
-                return openRouterTranscriber;
-            }
-
-            return withFallback(openRouterTranscriber, localFallback, logger);
+            const primary = createOpenRouterAudioTranscriber(logger);
+            if (!localFallback) return primary;
+            return {
+                async transcribe(path: string) {
+                    try { return await primary.transcribe(path); }
+                    catch (error) {
+                        logger.error(safeFailure(error, 'stt-fallback').diagnostic);
+                        return localFallback.transcribe(path);
+                    }
+                },
+            };
         } catch (error) {
-            logger.error(`[WhatsApp-Pi] OpenRouter STT unavailable: ${errorMessage(error)}`);
-            if (localFallback) {
-                logger.log('[WhatsApp-Pi] Falling back to local whisper-cpp-node STT.');
-                return localFallback;
-            }
-
-            return createFailingAudioTranscriber(error);
+            logger.error(safeFailure(error, 'stt-provider').diagnostic);
+            if (localFallback) return localFallback;
+            return { async transcribe() { throw new Error('Audio provider unavailable'); } };
         }
     }
-
-    if (!isLocalWhisperProvider(provider)) {
-        logger.error(`[WhatsApp-Pi] Unknown STT_PROVIDER="${provider}". Falling back to local whisper-cpp-node STT.`);
-    }
-
     return tryCreateWhisperCppAudioTranscriber(logger);
-}
-
-function isLocalWhisperProvider(provider: string): boolean {
-    return provider === ''
-        || provider === 'local'
-        || provider === 'whisper'
-        || provider === 'whisper-cpp'
-        || provider === 'whisper_cpp';
-}
-
-function withFallback(primary: AudioTranscriber, fallback: AudioTranscriber, logger: AudioLogger): AudioTranscriber {
-    return {
-        async transcribe(inputPath: string): Promise<string> {
-            try {
-                return await primary.transcribe(inputPath);
-            } catch (error) {
-                logger.error(`[WhatsApp-Pi] Primary STT provider failed, falling back to local whisper-cpp-node: ${errorMessage(error)}`);
-                return await fallback.transcribe(inputPath);
-            }
-        }
-    };
-}
-
-function createFailingAudioTranscriber(error: unknown): AudioTranscriber {
-    return {
-        async transcribe(): Promise<string> {
-            throw error instanceof Error ? error : new Error(String(error));
-        }
-    };
-}
-
-function errorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
 }
