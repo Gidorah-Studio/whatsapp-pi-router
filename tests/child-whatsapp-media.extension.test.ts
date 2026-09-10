@@ -31,6 +31,7 @@ test('child media extension registers send_wa_image and writes a parent-readable
     const originalHandoffDir = process.env.WHATSAPP_PI_ROUTER_IMAGE_HANDOFF_DIR;
     let registeredTool: RegisteredTool | undefined;
     const pi = {
+        on() {},
         registerTool(tool: RegisteredTool) {
             registeredTool = tool;
         }
