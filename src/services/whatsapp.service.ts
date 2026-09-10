@@ -432,7 +432,7 @@ export class WhatsAppService {
         return [...candidates];
     }
 
-    private getMentionedJids(message: IncomingMessageContent | undefined): string[] {
+    private unwrapGroupMessage(message: IncomingMessageContent | undefined): any {
         let content: any = message;
 
         for (let depth = 0; depth < 5 && content; depth++) {
@@ -449,9 +449,22 @@ export class WhatsAppService {
             break;
         }
 
-        if (!content || typeof content !== 'object') {
-            return [];
-        }
+        return content && typeof content === 'object' ? content : undefined;
+    }
+
+    private getGroupKeywordText(message: IncomingMessageContent | undefined): string {
+        const content = this.unwrapGroupMessage(message);
+        if (!content || content.protocolMessage) return '';
+        // Only the current message's authored text/caption. Never quoted replies,
+        // filenames, display names, reactions, placeholders, or audio transcripts.
+        const text = content.conversation ?? content.extendedTextMessage?.text ??
+            content.imageMessage?.caption ?? content.videoMessage?.caption ?? content.documentMessage?.caption;
+        return typeof text === 'string' ? text : '';
+    }
+
+    private getMentionedJids(message: IncomingMessageContent | undefined): string[] {
+        const content = this.unwrapGroupMessage(message);
+        if (!content) return [];
 
         const mentioned = new Set<string>();
         for (const value of [content, ...Object.values(content)]) {
@@ -514,7 +527,10 @@ export class WhatsAppService {
     }
 
     private async shouldRouteGroupMessage(message: IncomingMessageContent | undefined): Promise<boolean> {
-        return this.sessionManager.getGroupReplyMode() === 'all' || await this.isAgentMentioned(message);
+        const mode = this.sessionManager.getGroupReplyMode();
+        if (mode === 'all') return true;
+        if (mode === 'mentions-or-keywords' && this.sessionManager.matchesGroupReplyKeywords(this.getGroupKeywordText(message))) return true;
+        return this.isAgentMentioned(message);
     }
 
     private getDisconnectStatusCode(error: unknown): number | undefined {

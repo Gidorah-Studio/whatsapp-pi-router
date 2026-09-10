@@ -1,4 +1,6 @@
-import { mkdir, readFile, writeFile } from 'fs/promises';
+import { readFile } from 'fs/promises';
+import { normalizeGroupReplyKeywords } from './group-reply-keywords.js';
+import { atomicWritePrivate, SerialQueue } from './private-storage.js';
 import { join } from 'path';
 import { createStoragePaths } from './storage-path.js';
 import type { GroupReplyMode } from '../models/whatsapp.types.js';
@@ -7,6 +9,7 @@ export interface RouterAllowConfig {
     allowAllDirectChats: boolean;
     allowAllGroups: boolean;
     groupReplyMode: GroupReplyMode;
+    groupReplyKeywords: string[];
     allow: string[];
 }
 
@@ -14,6 +17,7 @@ const defaultRouterAllowConfig = (): RouterAllowConfig => ({
     allowAllDirectChats: false,
     allowAllGroups: false,
     groupReplyMode: 'all',
+    groupReplyKeywords: [],
     allow: []
 });
 
@@ -27,7 +31,7 @@ export const isTruthyConfigValue = (value: unknown): boolean => {
 export const normalizeGroupReplyMode = (value: unknown): GroupReplyMode | undefined => {
     if (typeof value !== 'string') return undefined;
     const normalized = value.trim().toLowerCase();
-    return normalized === 'all' || normalized === 'mentions' ? normalized : undefined;
+    return normalized === 'all' || normalized === 'mentions' || normalized === 'mentions-or-keywords' ? normalized : undefined;
 };
 
 export function getRouterAllowConfigPath(): string {
@@ -59,6 +63,7 @@ export const parseRouterAllowConfig = (raw: string): RouterAllowConfig => {
         allowAllDirectChats?: unknown;
         allowAllGroups?: unknown;
         groupReplyMode?: unknown;
+        groupReplyKeywords?: unknown;
     };
 
     const allowAllDirectChatsValue = config.allowAllDirectChats ?? config.allowAllDirect ?? config.allowAll;
@@ -67,6 +72,7 @@ export const parseRouterAllowConfig = (raw: string): RouterAllowConfig => {
         allowAllDirectChats: isTruthyConfigValue(allowAllDirectChatsValue),
         allowAllGroups: isTruthyConfigValue(config.allowAllGroups),
         groupReplyMode: normalizeGroupReplyMode(config.groupReplyMode) ?? 'all',
+        groupReplyKeywords: normalizeGroupReplyKeywords(config.groupReplyKeywords),
         allow: Array.isArray(config.allow) ? normalizeAllowValues(config.allow) : []
     };
 };
@@ -94,24 +100,29 @@ export async function loadRouterAllowConfig(): Promise<RouterAllowConfig> {
         allowAllDirectChats: envAllowAllDirectChats || fromFile.allowAllDirectChats,
         allowAllGroups: envAllowAllGroups || fromFile.allowAllGroups,
         groupReplyMode: fromFile.groupReplyMode,
+        groupReplyKeywords: fromFile.groupReplyKeywords,
         allow: [...fromEnv, ...fromFile.allow]
     };
 }
 
 export async function saveRouterAllowFileConfig(config: RouterAllowConfig): Promise<void> {
-    const storagePaths = createStoragePaths();
-    await mkdir(storagePaths.root, { recursive: true });
-    await writeFile(getRouterAllowConfigPath(), JSON.stringify({
+    await atomicWritePrivate(getRouterAllowConfigPath(), JSON.stringify({
         allowAllDirectChats: config.allowAllDirectChats,
         allowAllGroups: config.allowAllGroups,
         groupReplyMode: config.groupReplyMode,
+        groupReplyKeywords: normalizeGroupReplyKeywords(config.groupReplyKeywords),
         allow: config.allow
     }, null, 2));
 }
 
-export async function updateRouterAllowFileConfig(patch: Partial<Pick<RouterAllowConfig, 'allowAllDirectChats' | 'allowAllGroups' | 'groupReplyMode'>>): Promise<RouterAllowConfig> {
-    const current = await loadRouterAllowFileConfig();
-    const next = { ...current, ...patch };
-    await saveRouterAllowFileConfig(next);
-    return next;
+const configUpdates = new SerialQueue();
+
+export async function updateRouterAllowFileConfig(patch: Partial<Pick<RouterAllowConfig, 'allowAllDirectChats' | 'allowAllGroups' | 'groupReplyMode' | 'groupReplyKeywords'>>): Promise<RouterAllowConfig> {
+    return configUpdates.run(async () => {
+        const current = await loadRouterAllowFileConfig();
+        const next = { ...current, ...patch };
+        next.groupReplyKeywords = normalizeGroupReplyKeywords(next.groupReplyKeywords);
+        await saveRouterAllowFileConfig(next);
+        return next;
+    });
 }

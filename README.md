@@ -43,7 +43,7 @@ The router preserves the original allowlist/group controls from `whatsapp-pi` by
 
 Use `/whatsapp` → `Allow All Direct Chats: Off/On` to let every inbound direct chat route to Pi. Groups still require explicit allowlist entries by default.
 
-For groups, use `/whatsapp` → `Group Replies: All Messages/Mentions Only`. In **Mentions Only** mode, an allowed group message is routed to Pi only when WhatsApp's structured `mentionedJid` metadata explicitly identifies the connected agent's phone JID or LID. Direct chats are unaffected, and enabling mention-only mode does not grant access to groups that are not otherwise allowed. Ordinary allowed-group messages are saved to the local recents history but do not start a child Pi turn.
+For groups, use `/whatsapp` → `Group Replies` to choose **All messages**, **Mentions only**, or **Mentions or keywords**. In **Mentions only** mode, an allowed group message is routed to Pi only when WhatsApp's structured `mentionedJid` metadata explicitly identifies the connected agent's phone JID or LID. **Mentions or keywords** also accepts a configured word or phrase in the message text or caption. Direct chats are unaffected, and no reply mode grants access to groups that are not otherwise allowed. Non-matching allowed-group messages are saved to local recents but do not start a child Pi turn.
 
 New incoming group-history records include `participantJid` for the actual sender and `participantName` when WhatsApp supplies a display name. Use `participantJid`—not the user-controlled display name—for exact attribution. Existing records created before this field was added remain readable but cannot be reliably backfilled. The recents store retains the latest 200 messages per conversation; `get_wa_conversation_history` returns up to all 200 by default.
 
@@ -53,12 +53,40 @@ You can also configure these routing controls in `~/.pi/agent/extensions/whatsap
 {
   "allowAllDirectChats": true,
   "allowAllGroups": false,
-  "groupReplyMode": "mentions",
+  "groupReplyMode": "mentions-or-keywords",
+  "groupReplyKeywords": ["emily", "sales team"],
   "allow": []
 }
 ```
 
-`groupReplyMode` accepts `"all"` (the backwards-compatible default) or `"mentions"`. Mention detection uses WhatsApp metadata rather than matching visible `@name` text. `allowAllDirectChats` bypasses direct-chat allowlist checks at runtime without deleting the saved allowlist. Set it back to `false` or use the `/whatsapp` toggle to return to explicit allowlist mode. Legacy `"allowAll": true` is still accepted as an alias for direct chats only.
+`groupReplyMode` accepts `"all"` (the backwards-compatible default), `"mentions"`, or `"mentions-or-keywords"`. Mention detection uses WhatsApp metadata rather than matching visible `@name` text. `allowAllDirectChats` bypasses direct-chat allowlist checks at runtime without deleting the saved allowlist. Set it back to `false` or use the `/whatsapp` toggle to return to explicit allowlist mode. Legacy `"allowAll": true` is still accepted as an alias for direct chats only.
+
+### Configuring group keywords
+
+1. Open `/whatsapp` → **Group Keywords** and enter one word or phrase per line.
+2. Select **Mentions or keywords** under **Group Replies** to enable them.
+
+The list applies to all allowed groups for this router. Saving words alone does not
+change the reply mode. Menu changes apply immediately to subsequent incoming
+messages; manual edits to `router-allow.json` take effect after `/reload` or the next
+Pi startup. The list defaults to empty, so existing configurations keep their
+behavior. Clearing the editor removes keywords; an empty list in the combined mode
+means **mentions only**.
+
+- Up to 32 unique words or phrases, each up to 80 characters and containing a letter
+  or number. The editor reports invalid input instead of silently discarding it.
+- Matching ignores case, normalizes Unicode compatibility characters and whitespace,
+  and checks whole-word boundaries. `Emily` matches `Hey EMILY!`, not `Emilyson`,
+  `xEmily`, or `hey_emily`. Letters, combining marks, numbers, and underscores count
+  as word characters. Punctuation such as hyphens separates words.
+- Phrases match with normalized spacing: `sales team` also matches `sales  team`.
+  Punctuation is literal, not a regular expression. Accents are not stripped.
+- Only the current message's text and image/video/document captions are checked,
+  including wrapped messages. Quoted text, sender names, filenames, reactions,
+  document contents, and voice-note transcriptions do not trigger keyword replies.
+  Voice notes still route when they carry a valid agent mention.
+- Invalid entries in a manually edited keyword array are ignored; an invalid or
+  absent list becomes empty without broadening the selected reply mode.
 
 ## Connection reliability and recovery
 

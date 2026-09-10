@@ -179,3 +179,102 @@ test('mention-only mode resolves the agent LID when the socket exposes only its 
         await rm(harness.root, { recursive: true, force: true });
     }
 });
+
+test('mention-or-keyword mode routes authored text, captions, wrappers and mentions', async () => {
+    const h = await createHarness();
+    try {
+        h.manager.setGroupReplyMode('mentions-or-keywords');
+        h.manager.setGroupReplyKeywords(['Emily']);
+        for (const message of [
+            { conversation: 'Hey EMILY!' },
+            { extendedTextMessage: { text: 'Emily, help' } },
+            { imageMessage: { caption: 'emily' } },
+            { videoMessage: { caption: 'emily' } },
+            { documentMessage: { caption: 'emily' } },
+            { ephemeralMessage: { message: { conversation: 'emily' } } },
+            { viewOnceMessageV2: { message: { imageMessage: { caption: 'Emily!' } } } },
+            { documentWithCaptionMessage: { message: { documentMessage: { caption: 'Emily!' } } } },
+        ]) await h.handleIncomingMessages(groupMessage(undefined, message));
+        await h.handleIncomingMessages(groupMessage(AGENT_PHONE_JID));
+        await h.handleIncomingMessages(groupMessage(AGENT_LID_JID));
+        assert.equal(h.getRouted(), 10);
+        assert.equal(h.getRecorded().length, 10);
+        await h.service.drainIncoming();
+    } finally { await rm(h.root, { recursive: true, force: true }); }
+});
+
+test('keywords never inspect quoted text, filenames, display names, reactions or audio placeholders', async () => {
+    const h = await createHarness();
+    try {
+        h.manager.setGroupReplyMode('mentions-or-keywords');
+        h.manager.setGroupReplyKeywords(['Emily', 'audio', 'image', 'document']);
+        for (const message of [
+            { conversation: 'Emilyson' },
+            { extendedTextMessage: { text: 'hello', contextInfo: { quotedMessage: { conversation: 'Emily' } } } },
+            { documentMessage: { fileName: 'Emily.pdf' } },
+            { imageMessage: {} },
+            { audioMessage: {} },
+            { reactionMessage: { text: 'Emily' } },
+            { protocolMessage: { editedMessage: { conversation: 'Emily' } } },
+        ]) {
+            const payload = groupMessage(undefined, message);
+            payload.messages[0].pushName = 'Emily';
+            await h.handleIncomingMessages(payload);
+        }
+        assert.equal(h.getRouted(), 0);
+        assert.equal(h.getRecorded().length, 7);
+    } finally { await rm(h.root, { recursive: true, force: true }); }
+});
+
+test('empty keywords fall back to mentions and settings updates apply to subsequent messages', async () => {
+    const h = await createHarness();
+    try {
+        h.manager.setGroupReplyMode('mentions-or-keywords');
+        await h.handleIncomingMessages(groupMessage(undefined, { conversation: 'Emily' }));
+        assert.equal(h.getRouted(), 0);
+        h.manager.setGroupReplyKeywords(['Emily']);
+        await h.handleIncomingMessages(groupMessage(undefined, { conversation: 'Emily' }));
+        assert.equal(h.getRouted(), 1);
+        h.manager.setGroupReplyKeywords([]);
+        await h.handleIncomingMessages(groupMessage(undefined, { conversation: 'Emily' }));
+        await h.handleIncomingMessages(groupMessage(AGENT_PHONE_JID));
+        assert.equal(h.getRouted(), 2);
+        h.manager.setGroupReplyKeywords(['Emily']);
+        h.manager.setGroupReplyMode('mentions');
+        await h.handleIncomingMessages(groupMessage(undefined, { conversation: 'Emily' }));
+        assert.equal(h.getRouted(), 2);
+        await h.service.drainIncoming();
+    } finally { await rm(h.root, { recursive: true, force: true }); }
+});
+
+test('keywords never bypass group permissions or group binding, and direct chats are unchanged', async () => {
+    const h = await createHarness();
+    try {
+        h.manager.setGroupReplyMode('mentions-or-keywords');
+        h.manager.setGroupReplyKeywords(['Emily']);
+        await h.manager.removeAllowedGroup(GROUP_JID);
+        await h.handleIncomingMessages(groupMessage(undefined, { conversation: 'Emily' }));
+        assert.equal(h.getRouted(), 0);
+        await h.manager.addAllowedGroup(GROUP_JID, 'Test Group');
+        h.service.setGroupBinding('different@g.us');
+        await h.handleIncomingMessages(groupMessage(undefined, { conversation: 'Emily' }));
+        assert.equal(h.getRouted(), 0);
+        h.service.setGroupBinding(GROUP_JID);
+        await h.handleIncomingMessages(groupMessage(undefined, { conversation: 'Emily' }));
+        assert.equal(h.getRouted(), 1);
+        await h.service.drainIncoming();
+    } finally { await rm(h.root, { recursive: true, force: true }); }
+
+    const direct = await createHarness();
+    try {
+        direct.manager.setGroupReplyMode('mentions-or-keywords');
+        direct.manager.setGroupReplyKeywords(['Emily']);
+        await direct.manager.addNumber('+15550001111');
+        await direct.handleIncomingMessages({ messages: [{
+            key: { id: 'direct-no-keyword', remoteJid: '15550001111@s.whatsapp.net', fromMe: false },
+            message: { conversation: 'Hello' },
+        }] });
+        assert.equal(direct.getRouted(), 1);
+        await direct.service.drainIncoming();
+    } finally { await rm(direct.root, { recursive: true, force: true }); }
+});

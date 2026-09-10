@@ -474,6 +474,7 @@ export default function (pi: ExtensionAPI) {
         sessionManager.setAllowAllDirectChats(routerAllowConfig.allowAllDirectChats);
         sessionManager.setAllowAllGroups(routerAllowConfig.allowAllGroups);
         sessionManager.setGroupReplyMode(routerAllowConfig.groupReplyMode);
+        sessionManager.setGroupReplyKeywords(routerAllowConfig.groupReplyKeywords);
         if (routerAllowConfig.allowAllDirectChats) {
             logger.log('[WhatsApp-Pi] Router allow-all direct chats mode enabled; inbound direct chats will be routed without allowlist checks. Groups still require explicit allow unless group allow-all is enabled.');
         }
@@ -482,6 +483,8 @@ export default function (pi: ExtensionAPI) {
         }
         if (routerAllowConfig.groupReplyMode === 'mentions') {
             logger.log('[WhatsApp-Pi] Group mention-only mode enabled; allowed group messages will route only when the connected WhatsApp agent is explicitly mentioned.');
+        } else if (routerAllowConfig.groupReplyMode === 'mentions-or-keywords') {
+            logger.log(`[WhatsApp-Pi] Group mention-or-keyword mode enabled with ${routerAllowConfig.groupReplyKeywords.length} keywords; group access rules remain unchanged.`);
         }
         for (const number of routerAllowConfig.allow) {
             await sessionManager.addNumber(number);
