@@ -88,6 +88,18 @@ means **mentions only**.
 - Invalid entries in a manually edited keyword array are ignored; an invalid or
   absent list becomes empty without broadening the selected reply mode.
 
+## Reply targets and recent context
+
+Routed turns include the explicit WhatsApp quote when supplied. Group turns also receive up to the previous **20 messages from the same conversation**, excluding the current message and later arrivals. Direct chats receive quoted context but no automatic recent window. Routing triggers and allowlists are unchanged: a quote or a keyword inside quoted text does not itself trigger a reply.
+
+Quotes take priority when resolving references; without a quote, the child uses relevant nearby messages and asks for clarification when the target is ambiguous. Quote snapshots retain supplied text and author identifiers, with names/timestamps or missing text recovered only from matching same-chat records. Display names and client-supplied quote attribution are not independently verified identities.
+
+Quoted images use the existing bounded downloader and are attached separately (current image first, quoted image second when both exist). Unavailable images request a resend rather than guessing from the caption. This feature does not newly transcribe quoted audio or extract quoted video/documents.
+
+Background is passed through a private per-turn file and injected into the child's system prompt as untrusted conversation data, not appended to its user message. The normal handoff cleanup removes it. This avoids directly adding the entire window to extensions that capture only user/assistant messages, including the standard Honcho extension; answers can still contain background facts, and extensions that capture system prompts have different behavior. No Honcho dependency or integration is added.
+
+Local recents retention remains 200 messages. Each supplied preview is capped at 2,000 characters, quoted text at 12,000, and the serialized context at 96 KiB. Multibyte/escaped previews may be shortened further while retaining all selected entries and prioritizing the quote; truncation is labeled. Existing recents previews may have normalized whitespace/emoji.
+
 ## Connection reliability and recovery
 
 For always-on agents, configure boot/crash supervision, startup readiness checks,

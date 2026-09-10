@@ -1,4 +1,5 @@
 import { writeFile } from "node:fs/promises";
+import { buildReplyContext, serializeReplyContext, type ReplyContext } from './services/reply-context.js';
 import { InboundLedger } from './services/inbound-ledger.js';
 import { ConversationScheduler } from './services/conversation-scheduler.js';
 import { runManagedProcess } from './services/managed-process.js';
@@ -140,6 +141,9 @@ export const runPiForConversation = async (params: {
     cwd: string;
     imageBuffer?: Buffer;
     imageMimeType?: string;
+    replyContext?: ReplyContext;
+    quotedImageBuffer?: Buffer;
+    quotedImageMimeType?: string;
     childPiConfig: ResolvedChildPiConfig;
     signal: AbortSignal;
     mediaDir?: string;
@@ -166,6 +170,17 @@ export const runPiForConversation = async (params: {
             const imagePath = join(handoffDir, `incoming.${ext}`);
             await writeFile(imagePath, params.imageBuffer, { flag: 'wx', mode: 0o600 });
             args.push(`@${imagePath}`);
+        }
+
+        if (params.quotedImageBuffer && params.quotedImageMimeType) {
+            const ext = params.quotedImageMimeType.includes('png') ? 'png' : params.quotedImageMimeType.includes('webp') ? 'webp' : 'jpg';
+            const imagePath = join(handoffDir, `quoted.${ext}`);
+            await writeFile(imagePath, params.quotedImageBuffer, { flag: 'wx', mode: 0o600 });
+            args.push(`@${imagePath}`);
+        }
+        if (params.replyContext) {
+            const payload = serializeReplyContext(params.replyContext);
+            await writeFile(join(handoffDir, 'reply-context.json'), payload, { flag: 'wx', mode: 0o600 });
         }
 
         const text = await runManagedProcess(piBin, args, {
@@ -734,6 +749,32 @@ export default function (pi: ExtensionAPI) {
                 }
 
                 const conversationId = toConversationId(replyJid);
+                const timestampRaw = Number(msg.messageTimestamp);
+                const timestamp = Number.isFinite(timestampRaw) && timestampRaw > 0
+                    ? (timestampRaw < 1_000_000_000_000 ? timestampRaw * 1000 : timestampRaw) : Date.now();
+                let history: Awaited<ReturnType<RecentsService['getConversationHistory']>> = [];
+                try { history = await recentsService.getConversationHistory(conversationId); }
+                catch { logger.error('Same-chat recent context unavailable; no other conversation will be used.'); }
+                const { context: replyContext, quotedImage } = buildReplyContext({
+                    conversationJid: remoteJid, historyKey: conversationId,
+                    currentMessageId: msg.key.id ?? '', timestamp, isGroup, message: msg.message, history,
+                });
+                let quotedImageBuffer: Buffer | undefined;
+                let quotedImageMimeType: string | undefined;
+                if (quotedImage && replyContext.quoted) {
+                    try {
+                        const quoted = await incomingMediaService.process({ kind: 'image', text: '', imageMessage: quotedImage }, 'Quoted image', mediaTurn, signal);
+                        quotedImageBuffer = quoted.imageBuffer;
+                        quotedImageMimeType = quoted.imageMimeType;
+                        if (!quotedImageBuffer || !quotedImageMimeType) throw new Error('Quoted image unavailable');
+                        replyContext.quoted.imageStatus = 'attached';
+                        replyContext.quoted.imageIndex = imageBuffer ? 2 : 1;
+                    } catch {
+                        signal.throwIfAborted();
+                        replyContext.quoted.imageStatus = 'unavailable';
+                        replyContext.quoted.unavailable = 'The quoted image could not be downloaded. Its caption is not a substitute for seeing the image; ask the user to resend it.';
+                    }
+                }
                 if (!isGroup) {
                     await identityMapService.recordIncomingIdentity({
                         conversationId, whatsappJid: replyJid, alternateJid, lidJid, phoneJid,
@@ -763,7 +804,9 @@ export default function (pi: ExtensionAPI) {
                     childPiConfig,
                     signal,
                     mediaDir: mediaTurn.temporary,
+                    replyContext,
                     ...(imageBuffer && imageMimeType ? { imageBuffer, imageMimeType } : {}),
+                    ...(quotedImageBuffer && quotedImageMimeType ? { quotedImageBuffer, quotedImageMimeType } : {}),
                 });
                 try {
                     signal.throwIfAborted();
