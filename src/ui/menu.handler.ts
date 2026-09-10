@@ -8,6 +8,7 @@ import * as qrcode from 'qrcode-terminal';
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { t } from '../i18n.js';
 import { updateRouterAllowFileConfig } from '../services/router-allow.config.js';
+import { parseGroupReplyKeywordsInput } from '../services/group-reply-keywords.js';
 import { IdentityMapService, normalizeIdentityEmail, normalizePhoneDigits } from '../services/identity-map.service.js';
 import {
     CHILD_PI_THINKING_LEVELS,
@@ -61,9 +62,12 @@ export class MenuHandler {
         const allowAllDirectChatsLabel = t(this.sessionManager.getAllowAllDirectChats()
             ? 'menu.root.allowAllDirectChatsOn'
             : 'menu.root.allowAllDirectChatsOff');
-        const groupReplyModeLabel = t(this.sessionManager.getGroupReplyMode() === 'mentions'
-            ? 'menu.root.groupRepliesMentions'
-            : 'menu.root.groupRepliesAll');
+        const groupReplyModeLabel = t(({
+            all: 'menu.root.groupRepliesAll',
+            mentions: 'menu.root.groupRepliesMentions',
+            'mentions-or-keywords': 'menu.root.groupRepliesKeywords',
+        } as const)[this.sessionManager.getGroupReplyMode()]);
+        const groupKeywordsLabel = t('menu.root.groupKeywords', { count: this.sessionManager.getGroupReplyKeywords().length });
         const childPiSettingsLabel = t('menu.root.childPiSettings');
         const voiceRepliesLabel = t('menu.root.voiceReplies');
         const logoffDeleteSessionLabel = t('menu.root.logoffDeleteSession');
@@ -93,6 +97,7 @@ export class MenuHandler {
             options.push(groupReplyModeLabel);
         }
 
+        options.push(groupKeywordsLabel);
         options.push(diagnosticsLabel);
         options.push(childPiSettingsLabel);
         options.push(voiceRepliesLabel);
@@ -159,7 +164,10 @@ export class MenuHandler {
                 await this.toggleAllowAllDirectChats(ctx);
                 break;
             case groupReplyModeLabel:
-                await this.toggleGroupReplyMode(ctx);
+                await this.selectGroupReplyMode(ctx);
+                break;
+            case groupKeywordsLabel:
+                await this.configureGroupReplyKeywords(ctx);
                 break;
             case childPiSettingsLabel:
                 await this.manageChildPiSettings(ctx);
@@ -230,8 +238,18 @@ export class MenuHandler {
         await this.handleCommand(ctx);
     }
 
-    private async toggleGroupReplyMode(ctx: ExtensionCommandContext) {
-        const nextMode = this.sessionManager.getGroupReplyMode() === 'mentions' ? 'all' : 'mentions';
+    private async selectGroupReplyMode(ctx: ExtensionCommandContext) {
+        const modes = [
+            { mode: 'all', label: t('menu.groupReplies.all') },
+            { mode: 'mentions', label: t('menu.groupReplies.mentions') },
+            { mode: 'mentions-or-keywords', label: t('menu.groupReplies.keywords') },
+        ] as const;
+        const selected = await ctx.ui.select(t('menu.groupReplies.prompt'), modes.map(option => option.label));
+        const nextMode = modes.find(option => option.label === selected)?.mode;
+        if (!nextMode || nextMode === this.sessionManager.getGroupReplyMode()) {
+            await this.handleCommand(ctx);
+            return;
+        }
 
         if (nextMode === 'all') {
             const confirmed = await ctx.ui.confirm(
@@ -245,17 +263,41 @@ export class MenuHandler {
         }
 
         try {
-            await updateRouterAllowFileConfig({ groupReplyMode: nextMode });
-            this.sessionManager.setGroupReplyMode(nextMode);
-            ctx.ui.notify(nextMode === 'mentions'
-                ? t('menu.root.groupRepliesMentionsEnabled')
-                : t('menu.root.groupRepliesAllEnabled'), nextMode === 'mentions' ? 'info' : 'warning');
+            const saved = await updateRouterAllowFileConfig({ groupReplyMode: nextMode });
+            this.sessionManager.setGroupReplyKeywords(saved.groupReplyKeywords);
+            this.sessionManager.setGroupReplyMode(saved.groupReplyMode);
+            ctx.ui.notify(t(({
+                all: 'menu.root.groupRepliesAllEnabled',
+                mentions: 'menu.root.groupRepliesMentionsEnabled',
+                'mentions-or-keywords': saved.groupReplyKeywords.length
+                    ? 'menu.root.groupRepliesKeywordsEnabled' : 'menu.groupKeywords.empty',
+            } as const)[nextMode]), nextMode === 'all' ? 'warning' : 'info');
         } catch (error) {
             ctx.ui.notify(t('menu.root.groupRepliesSaveFailure', {
                 error: error instanceof Error ? error.message : String(error)
             }), 'error');
         }
 
+        await this.handleCommand(ctx);
+    }
+
+    private async configureGroupReplyKeywords(ctx: ExtensionCommandContext) {
+        const input = await ctx.ui.editor(t('menu.groupKeywords.prompt'), this.sessionManager.getGroupReplyKeywords().join('\n'));
+        if (input !== undefined) {
+            try {
+                const keywords = parseGroupReplyKeywordsInput(input);
+                const saved = await updateRouterAllowFileConfig({ groupReplyKeywords: keywords });
+                this.sessionManager.setGroupReplyKeywords(saved.groupReplyKeywords);
+                this.sessionManager.setGroupReplyMode(saved.groupReplyMode);
+                const key = !saved.groupReplyKeywords.length ? 'menu.groupKeywords.empty'
+                    : saved.groupReplyMode === 'mentions-or-keywords' ? 'menu.groupKeywords.saved' : 'menu.groupKeywords.inactive';
+                ctx.ui.notify(t(key, { count: saved.groupReplyKeywords.length }), 'info');
+            } catch (error) {
+                ctx.ui.notify(t('menu.groupKeywords.saveFailure', {
+                    error: error instanceof Error ? error.message : String(error),
+                }), 'error');
+            }
+        }
         await this.handleCommand(ctx);
     }
 

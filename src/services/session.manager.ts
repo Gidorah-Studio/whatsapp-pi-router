@@ -3,6 +3,7 @@ import { basename, join } from 'path';
 import { readFile, writeFile, mkdir, rm, rename, readdir } from 'fs/promises';
 import { SessionStatus, type GroupReplyMode } from '../models/whatsapp.types.js';
 import { t } from '../i18n.js';
+import { GroupReplyKeywordMatcher } from './group-reply-keywords.js';
 import {
     getDefaultLegacyStorageRoot,
     getDefaultStorageRoot,
@@ -55,6 +56,7 @@ export class SessionManager {
     private allowAllDirectChats = false;
     private allowAllGroups = false;
     private groupReplyMode: GroupReplyMode = 'all';
+    private groupReplyKeywordMatcher = new GroupReplyKeywordMatcher();
     private hasAuthState = false;
     // A persisted "connected" status is not evidence of a socket in this process.
     private liveConnected = false;
@@ -271,6 +273,18 @@ export class SessionManager {
 
     getGroupReplyMode(): GroupReplyMode {
         return this.groupReplyMode;
+    }
+
+    setGroupReplyKeywords(keywords: string[]) {
+        this.groupReplyKeywordMatcher = new GroupReplyKeywordMatcher(keywords);
+    }
+
+    getGroupReplyKeywords(): string[] {
+        return this.groupReplyKeywordMatcher.getKeywords();
+    }
+
+    matchesGroupReplyKeywords(text: string): boolean {
+        return this.groupReplyKeywordMatcher.matches(text);
     }
 
     getAllowList(): Contact[] {
