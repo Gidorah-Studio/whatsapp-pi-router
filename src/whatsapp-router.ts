@@ -497,9 +497,9 @@ export default function (pi: ExtensionAPI) {
             logger.log('[WhatsApp-Pi] Router allow-all groups mode enabled; inbound group conversations will be routed without allowlist checks.');
         }
         if (routerAllowConfig.groupReplyMode === 'mentions') {
-            logger.log('[WhatsApp-Pi] Group mention-only mode enabled; allowed group messages will route only when the connected WhatsApp agent is explicitly mentioned.');
+            logger.log('[WhatsApp-Pi] Group mentions-or-replies mode enabled; allowed group messages will route when the connected WhatsApp agent is mentioned or its message is replied to.');
         } else if (routerAllowConfig.groupReplyMode === 'mentions-or-keywords') {
-            logger.log(`[WhatsApp-Pi] Group mention-or-keyword mode enabled with ${routerAllowConfig.groupReplyKeywords.length} keywords; group access rules remain unchanged.`);
+            logger.log(`[WhatsApp-Pi] Group mentions, keywords or replies mode enabled with ${routerAllowConfig.groupReplyKeywords.length} keywords; group access rules remain unchanged.`);
         }
         for (const number of routerAllowConfig.allow) {
             await sessionManager.addNumber(number);

@@ -8,6 +8,7 @@ import P from 'pino';
 import { InboundLedger, inboundDedupKeys, type InboundClaimStore } from './inbound-ledger.js';
 import { SerialQueue } from './private-storage.js';
 import { safeFailure } from './router-errors.js';
+import { extractReplyTarget } from './reply-context.js';
 import { SessionManager } from './session.manager.js';
 import { IncomingMessage, SessionStatus } from '../models/whatsapp.types.js';
 import { MessageSender } from './message.sender.js';
@@ -416,12 +417,12 @@ export class WhatsAppService {
         return domain ? `${normalizedLocal}@${domain}` : normalizedLocal;
     }
 
-    private getAgentJidCandidates(): string[] {
+    private getAgentJidCandidates(includeStoredOperator = true): string[] {
         const user = this.socket?.user;
         const rawJids = [
             user?.id,
             user?.lid,
-            this.sessionManager.getOperatorJid()
+            ...(includeStoredOperator ? [this.sessionManager.getOperatorJid()] : [])
         ].filter((jid): jid is string => Boolean(jid));
         const candidates = new Set<string>();
 
@@ -484,18 +485,14 @@ export class WhatsAppService {
         candidates.add(this.normalizeJidForComparison(jid));
     }
 
-    private async getAgentMentionJidCandidates(): Promise<Set<string>> {
-        const candidates = new Set(this.getAgentJidCandidates());
+    private async getAgentIdentityCandidates(includeStoredOperator = true): Promise<Set<string>> {
+        const candidates = new Set(this.getAgentJidCandidates(includeStoredOperator));
         const mapping = this.socket?.signalRepository?.lidMapping;
         if (!mapping) {
             return candidates;
         }
 
-        const rawJids = [
-            this.socket?.user?.id,
-            this.socket?.user?.lid,
-            this.sessionManager.getOperatorJid()
-        ].filter((jid): jid is string => Boolean(jid));
+        const rawJids = [...candidates];
 
         for (const rawJid of rawJids) {
             const jid = this.normalizeRecipientJid(rawJid);
@@ -507,7 +504,7 @@ export class WhatsAppService {
                 }
             } catch (error) {
                 if (this.isVerbose()) {
-                    console.error('[WhatsApp-Pi] Failed to resolve agent mention identity:', error);
+                    console.error('[WhatsApp-Pi] Failed to resolve agent WhatsApp identity:', error);
                 }
             }
         }
@@ -516,7 +513,7 @@ export class WhatsAppService {
     }
 
     private async isAgentMentioned(message: IncomingMessageContent | undefined): Promise<boolean> {
-        const agentJids = await this.getAgentMentionJidCandidates();
+        const agentJids = await this.getAgentIdentityCandidates();
         if (agentJids.size === 0) {
             return false;
         }
@@ -526,10 +523,22 @@ export class WhatsAppService {
         );
     }
 
-    private async shouldRouteGroupMessage(message: IncomingMessageContent | undefined): Promise<boolean> {
+    private async isReplyToAgent(message: IncomingMessageContent | undefined, groupJid: string): Promise<boolean> {
+        const target = extractReplyTarget(message, groupJid);
+        if (!target || target.unavailable || !target.messageId || !target.authorJid) return false;
+        // Only WhatsApp account JIDs, not names, quoted text, or a lookalike JID.
+        if (!/^\d+(?::\d+)?@(s\.whatsapp\.net|lid)$/.test(target.authorJid)) return false;
+        // Use the live account plus Baileys' PN/LID mapping. A persisted operator
+        // from an earlier login is not evidence of the connected account's identity.
+        const agentJids = await this.getAgentIdentityCandidates(false);
+        return agentJids.has(this.normalizeJidForComparison(target.authorJid));
+    }
+
+    private async shouldRouteGroupMessage(message: IncomingMessageContent | undefined, groupJid: string): Promise<boolean> {
         const mode = this.sessionManager.getGroupReplyMode();
         if (mode === 'all') return true;
         if (mode === 'mentions-or-keywords' && this.sessionManager.matchesGroupReplyKeywords(this.getGroupKeywordText(message))) return true;
+        if (await this.isReplyToAgent(message, groupJid)) return true;
         return this.isAgentMentioned(message);
     }
 
@@ -1075,7 +1084,7 @@ export class WhatsAppService {
                 return;
             }
 
-            if (!await this.shouldRouteGroupMessage(message.message)) {
+            if (!await this.shouldRouteGroupMessage(message.message, remoteJid)) {
                 if (this.isVerbose()) {
                     console.log(t('service.whatsapp.ignoredGroupWithoutMention', { groupJid: remoteJid }));
                 }
@@ -1100,7 +1109,7 @@ export class WhatsAppService {
             return;
         }
 
-        if (isGroup && !await this.shouldRouteGroupMessage(message.message)) {
+        if (isGroup && !await this.shouldRouteGroupMessage(message.message, remoteJid)) {
             if (this.isVerbose()) {
                 console.log(t('service.whatsapp.ignoredGroupWithoutMention', { groupJid: remoteJid }));
             }

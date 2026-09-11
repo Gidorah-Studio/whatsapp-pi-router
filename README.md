@@ -43,7 +43,7 @@ The router preserves the original allowlist/group controls from `whatsapp-pi` by
 
 Use `/whatsapp` → `Allow All Direct Chats: Off/On` to let every inbound direct chat route to Pi. Groups still require explicit allowlist entries by default.
 
-For groups, use `/whatsapp` → `Group Replies` to choose **All messages**, **Mentions only**, or **Mentions or keywords**. In **Mentions only** mode, an allowed group message is routed to Pi only when WhatsApp's structured `mentionedJid` metadata explicitly identifies the connected agent's phone JID or LID. **Mentions or keywords** also accepts a configured word or phrase in the message text or caption. Direct chats are unaffected, and no reply mode grants access to groups that are not otherwise allowed. Non-matching allowed-group messages are saved to local recents but do not start a child Pi turn.
+For groups, use `/whatsapp` → `Group Replies` to choose **All messages**, **Mentions or replies**, or **Mentions, keywords or replies**. Both restricted modes accept a WhatsApp mention of the agent or a reply to the agent's message. The keyword mode also accepts a configured word or phrase in the current message text or caption. Direct chats are unaffected, and no reply mode grants access to groups that are not otherwise allowed. Non-matching allowed-group messages are saved to local recents but do not start a child Pi turn.
 
 New incoming group-history records include `participantJid` for the actual sender and `participantName` when WhatsApp supplies a display name. Use `participantJid`—not the user-controlled display name—for exact attribution. Existing records created before this field was added remain readable but cannot be reliably backfilled. The recents store retains the latest 200 messages per conversation; `get_wa_conversation_history` returns up to all 200 by default.
 
@@ -59,19 +59,19 @@ You can also configure these routing controls in `~/.pi/agent/extensions/whatsap
 }
 ```
 
-`groupReplyMode` accepts `"all"` (the backwards-compatible default), `"mentions"`, or `"mentions-or-keywords"`. Mention detection uses WhatsApp metadata rather than matching visible `@name` text. `allowAllDirectChats` bypasses direct-chat allowlist checks at runtime without deleting the saved allowlist. Set it back to `false` or use the `/whatsapp` toggle to return to explicit allowlist mode. Legacy `"allowAll": true` is still accepted as an alias for direct chats only.
+`groupReplyMode` still accepts `"all"` (the default), `"mentions"`, or `"mentions-or-keywords"`; existing files need no migration. Both `"mentions"` and `"mentions-or-keywords"` now also admit replies to the agent. Mention detection uses WhatsApp metadata rather than matching visible `@name` text. `allowAllDirectChats` bypasses direct-chat allowlist checks at runtime without deleting the saved allowlist. Set it back to `false` or use the `/whatsapp` toggle to return to explicit allowlist mode. Legacy `"allowAll": true` is still accepted as an alias for direct chats only.
 
 ### Configuring group keywords
 
 1. Open `/whatsapp` → **Group Keywords** and enter one word or phrase per line.
-2. Select **Mentions or keywords** under **Group Replies** to enable them.
+2. Select **Mentions, keywords or replies** under **Group Replies** to enable them.
 
 The list applies to all allowed groups for this router. Saving words alone does not
 change the reply mode. Menu changes apply immediately to subsequent incoming
 messages; manual edits to `router-allow.json` take effect after `/reload` or the next
 Pi startup. The list defaults to empty, so existing configurations keep their
-behavior. Clearing the editor removes keywords; an empty list in the combined mode
-means **mentions only**.
+keyword behavior. Clearing the editor removes keywords; an empty list in the combined
+mode still admits mentions and replies to the agent.
 
 - Up to 32 unique words or phrases, each up to 80 characters and containing a letter
   or number. The editor reports invalid input instead of silently discarding it.
@@ -84,13 +84,17 @@ means **mentions only**.
 - Only the current message's text and image/video/document captions are checked,
   including wrapped messages. Quoted text, sender names, filenames, reactions,
   document contents, and voice-note transcriptions do not trigger keyword replies.
-  Voice notes still route when they carry a valid agent mention.
+  Voice notes still route when they carry a valid agent mention or reply to the agent.
 - Invalid entries in a manually edited keyword array are ignored; an invalid or
   absent list becomes empty without broadening the selected reply mode.
 
 ## Reply targets and recent context
 
-Routed turns include the explicit WhatsApp quote when supplied. Group turns also receive up to the previous **20 messages from the same conversation**, excluding the current message and later arrivals. Direct chats receive quoted context but no automatic recent window. Routing triggers and allowlists are unchanged: a quote or a keyword inside quoted text does not itself trigger a reply.
+Routed turns include the explicit WhatsApp quote when supplied. Group turns also receive up to the previous **20 messages from the same conversation**, excluding the current message and later arrivals. Direct chats receive quoted context but no automatic recent window.
+
+A group reply to the agent now triggers a turn without a mention or keyword. The current message's reply metadata must contain a nonempty `stanzaId` and a `participant` JID matching the connected WhatsApp account's phone JID or LID (including device suffixes and aliases resolved through Baileys' PN/LID mapping). A quote explicitly pointing to another conversation is rejected as a trigger. Cached operator identities from an earlier login, display names, quoted text, nested quotes, reactions, and protocol messages do not establish a reply to the agent. Missing or malformed identifiers do not trigger a turn; if an alias cannot be resolved, an explicit mention or configured keyword is still needed.
+
+Replies to other members stay quiet unless the **current message** mentions the agent or matches an enabled keyword, or the router is in **All messages** mode. Group allowlists, group-only binding, self-message exclusion, and deduplication still apply. The admitted message follows the existing context path: its explicit quote is the primary target unless the current request says otherwise. Reply metadata identifies the target account; the quoted snapshot remains sender-supplied, untrusted content, not independently authenticated original text.
 
 Quotes take priority when resolving references; without a quote, the child uses relevant nearby messages and asks for clarification when the target is ambiguous. Quote snapshots retain supplied text and author identifiers, with names/timestamps or missing text recovered only from matching same-chat records. Display names and client-supplied quote attribution are not independently verified identities.
 

@@ -79,15 +79,15 @@ test('menu edits keywords without enabling them, then selecting the combined mod
         assert.deepEqual(edit.editors, ['emily']);
         assert.deepEqual(h.manager.getGroupReplyKeywords(), ['emily', 'sales team']);
         assert.equal(h.manager.getGroupReplyMode(), 'mentions');
-        assert.match(edit.notices[0].text, /Select Mentions or keywords/);
-        const select = context(['Group Replies: Mentions Only', 'Mentions or keywords', undefined]);
+        assert.match(edit.notices[0].text, /Select Mentions, keywords or replies/);
+        const select = context(['Group Replies: Mentions or Replies', 'Mentions, keywords or replies', undefined]);
         await h.menu.handleCommand(select.ctx);
         assert.equal(h.manager.getGroupReplyMode(), 'mentions-or-keywords');
         assert.equal((await loadRouterAllowFileConfig()).groupReplyMode, 'mentions-or-keywords');
         const clear = context(['Group Keywords: 2', undefined], '');
         await h.menu.handleCommand(clear.ctx);
         assert.deepEqual(h.manager.getGroupReplyKeywords(), []);
-        assert.match(clear.notices[0].text, /mentions only/);
+        assert.match(clear.notices[0].text, /mentions and replies to the agent/);
     } finally { await h.cleanup(); }
 });
 
@@ -96,8 +96,8 @@ test('cancelled editor, cancelled mode selection and declined all-message confir
     try {
         const original = await readFile(getRouterAllowConfigPath(), 'utf8');
         await h.menu.handleCommand(context(['Group Keywords: 1', undefined]).ctx);
-        await h.menu.handleCommand(context(['Group Replies: Mentions Only', undefined, undefined]).ctx);
-        await h.menu.handleCommand(context(['Group Replies: Mentions Only', 'All messages', undefined]).ctx);
+        await h.menu.handleCommand(context(['Group Replies: Mentions or Replies', undefined, undefined]).ctx);
+        await h.menu.handleCommand(context(['Group Replies: Mentions or Replies', 'All messages', undefined]).ctx);
         assert.equal(await readFile(getRouterAllowConfigPath(), 'utf8'), original);
         assert.equal(h.manager.getGroupReplyMode(), 'mentions');
     } finally { await h.cleanup(); }
