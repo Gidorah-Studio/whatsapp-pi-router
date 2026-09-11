@@ -3,6 +3,10 @@ import type { RecentConversationMessage } from '../models/whatsapp.types.js';
 export const RECENT_CONTEXT_LIMIT = 20;
 export const MAX_REPLY_CONTEXT_BYTES = 96 * 1024;
 const short = (v: unknown, max = 256): string | undefined => typeof v === 'string' && v.trim() ? v.slice(0, max) : undefined;
+// Identifiers are compared, never truncated: a shortened value could identify a
+// different message or account. Missing/malformed metadata cannot trigger routing.
+const replyIdentifier = (v: unknown): string | undefined =>
+    typeof v === 'string' && v.length > 0 && v.length <= 256 && !/[\s\p{C}]/u.test(v) ? v : undefined;
 
 export function unwrapReplyContent(message: any): any {
     let value = message;
@@ -20,11 +24,12 @@ export function extractReplyTarget(message: any, conversationJid: string): {
     messageId?: string; authorJid?: string; content?: any; unavailable?: string;
 } | undefined {
     const body = unwrapReplyContent(message);
+    if (body.protocolMessage || body.reactionMessage) return undefined;
     const candidates = [body, ...Object.values(body)];
     for (const candidate of candidates) {
         const c = (candidate as any)?.contextInfo;
         if (!c || (!c.stanzaId && !c.quotedMessage)) continue;
-        const target = { messageId: short(c.stanzaId), authorJid: short(c.participant) };
+        const target = { messageId: replyIdentifier(c.stanzaId), authorJid: replyIdentifier(c.participant) };
         if (c.remoteJid && c.remoteJid !== conversationJid) {
             return { ...target, unavailable: 'Quoted target belongs to another conversation; content withheld.' };
         }
