@@ -43,10 +43,11 @@ test('missing snapshot falls back only to matching prior same-chat record', () =
 });
 
 test('cross-chat quote withheld even when ID collides with local record', () => {
-    const { context, quotedImage } = buildReplyContext({ ...base, message: quote({ conversation: 'private content' }, { remoteJid: 'private@lid' }) });
+    const { context, quotedImage, quotedPdf } = buildReplyContext({ ...base, message: quote({ documentMessage: { fileName: 'private.pdf', mimetype: 'application/pdf', caption: 'private content' } }, { remoteJid: 'private@lid' }) });
     assert.equal(context.quoted?.text, undefined);
     assert(context.quoted?.unavailable?.includes('another conversation'));
     assert.equal(quotedImage, undefined);
+    assert.equal(quotedPdf, undefined);
 });
 
 test('quote in wrapped image caption carries metadata; never follows a nested quote', () => {
@@ -63,6 +64,24 @@ test('quoted image can be downloaded separately without putting media keys in co
     assert.equal(context.quoted?.kind, 'image');
     assert.equal(context.quoted?.imageStatus, 'pending');
     assert(!JSON.stringify(context).includes('secret-media-key'));
+});
+
+test('quoted PDF returns download metadata separately without leaking media keys into context', () => {
+    const pdf = { fileName: 'report.pdf', mimetype: 'application/pdf', caption: 'Quarterly report', mediaKey: 'secret-pdf-key' };
+    const { context, quotedPdf } = buildReplyContext({ ...base, message: quote({ documentMessage: pdf }) });
+    assert.equal(quotedPdf, pdf);
+    assert.equal(context.quoted?.kind, 'document');
+    assert.equal(context.quoted?.pdfStatus, 'pending');
+    assert.equal(context.quoted?.text, 'Quarterly report');
+    assert(!JSON.stringify(context).includes('secret-pdf-key'));
+});
+
+test('quoted non-PDF documents remain metadata-only', () => {
+    const document = { fileName: 'notes.docx', mimetype: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', caption: 'Notes' };
+    const { context, quotedPdf } = buildReplyContext({ ...base, message: quote({ documentMessage: document }) });
+    assert.equal(quotedPdf, undefined);
+    assert.equal(context.quoted?.kind, 'document');
+    assert.equal(context.quoted?.pdfStatus, undefined);
 });
 
 test('text is bounded and ambiguity guidance does not guess from old topics', () => {

@@ -24,6 +24,12 @@ export async function createIncomingMediaTurn(conversation: string, root = creat
             await writeFile(path, buffer, { flag: 'wx', mode: 0o600 });
             return path;
         },
+        async saveTemporaryDocument(fileName: string, buffer: Buffer): Promise<string> {
+            const sanitized = fileName.replace(/[^a-z0-9._-]/gi, '_').slice(-120) || 'document';
+            const path = join(temporary, `${randomUUID()}_${sanitized}`);
+            await writeFile(path, buffer, { flag: 'wx', mode: 0o600 });
+            return path;
+        },
         cleanup: () => rm(temporary, { recursive: true, force: true }),
     };
 }
