@@ -44,7 +44,7 @@ test('invalid/oversized context fails to a clarification instruction, not stale 
         assert(before);
         process.env.WHATSAPP_PI_ROUTER_IMAGE_HANDOFF_DIR = root;
         assert.equal(await before({ systemPrompt: 'base' }), undefined);
-        for (const content of ['invalid JSON', 'x'.repeat(100000), JSON.stringify({ version: 1, recentMessages: Array(21).fill({}), conversationJid: 'group' })]) {
+        for (const content of ['invalid JSON', 'x'.repeat(100000), JSON.stringify({ version: 1, recentMessages: Array(51).fill({}), conversationJid: 'group' })]) {
             await writeFile(join(root, 'reply-context.json'), content);
             const result = await before({ systemPrompt: 'base' });
             assert(result.systemPrompt.includes('Ask the user to specify the target'));
