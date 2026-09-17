@@ -1,6 +1,6 @@
 import { resolve, join } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
-import { formatReplyContext, MAX_REPLY_CONTEXT_BYTES, type ReplyContext } from './services/reply-context.js';
+import { formatReplyContext, MAX_REPLY_CONTEXT_BYTES, RECENT_CONTEXT_LIMIT, type ReplyContext } from './services/reply-context.js';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from '@sinclair/typebox';
 import {
@@ -18,7 +18,7 @@ export default function (pi: ExtensionAPI) {
         try {
             if ((await stat(path)).size > MAX_REPLY_CONTEXT_BYTES) throw new Error('Context too large');
             const context = JSON.parse(await readFile(path, 'utf8')) as ReplyContext;
-            if (context.version !== 1 || !Array.isArray(context.recentMessages) || context.recentMessages.length > 20 || typeof context.conversationJid !== 'string') throw new Error('Invalid context');
+            if (context.version !== 1 || !Array.isArray(context.recentMessages) || context.recentMessages.length > RECENT_CONTEXT_LIMIT || typeof context.conversationJid !== 'string') throw new Error('Invalid context');
             return { systemPrompt: event.systemPrompt + '\n\n' + formatReplyContext(context) };
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;

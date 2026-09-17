@@ -1,6 +1,6 @@
 import type { RecentConversationMessage } from '../models/whatsapp.types.js';
 
-export const RECENT_CONTEXT_LIMIT = 20;
+export const RECENT_CONTEXT_LIMIT = 50;
 export const MAX_REPLY_CONTEXT_BYTES = 96 * 1024;
 const short = (v: unknown, max = 256): string | undefined => typeof v === 'string' && v.trim() ? v.slice(0, max) : undefined;
 // Identifiers are compared, never truncated: a shortened value could identify a
@@ -103,7 +103,7 @@ export function buildReplyContext(params: {
 export function serializeReplyContext(context: ReplyContext): string {
     const bounded = structuredClone(context);
     let json = JSON.stringify(bounded);
-    // UTF-8 and JSON escaping can exceed a character-based estimate. Keep all 20
+    // UTF-8 and JSON escaping can exceed a character-based estimate. Keep all selected
     // entries, shorten previews first, and preserve the explicit quote where possible.
     while (Buffer.byteLength(json) > MAX_REPLY_CONTEXT_BYTES) {
         const longest = [...bounded.recentMessages].sort((a, b) => b.text.length - a.text.length)[0];

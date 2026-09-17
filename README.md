@@ -90,7 +90,7 @@ mode still admits mentions and replies to the agent.
 
 ## Reply targets and recent context
 
-Routed turns include the explicit WhatsApp quote when supplied. Group turns also receive up to the previous **20 messages from the same conversation**, excluding the current message and later arrivals. Direct chats receive quoted context but no automatic recent window.
+Routed turns include the explicit WhatsApp quote when supplied. Group turns also receive up to the previous **50 messages from the same conversation**, excluding the current message and later arrivals. Direct chats receive quoted context but no automatic recent window.
 
 A group reply to the agent now triggers a turn without a mention or keyword. The current message's reply metadata must contain a nonempty `stanzaId` and a `participant` JID matching the connected WhatsApp account's phone JID or LID (including device suffixes and aliases resolved through Baileys' PN/LID mapping). A quote explicitly pointing to another conversation is rejected as a trigger. Cached operator identities from an earlier login, display names, quoted text, nested quotes, reactions, and protocol messages do not establish a reply to the agent. Missing or malformed identifiers do not trigger a turn; if an alias cannot be resolved, an explicit mention or configured keyword is still needed.
 
