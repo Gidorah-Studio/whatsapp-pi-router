@@ -755,7 +755,7 @@ export default function (pi: ExtensionAPI) {
                 let history: Awaited<ReturnType<RecentsService['getConversationHistory']>> = [];
                 try { history = await recentsService.getConversationHistory(conversationId); }
                 catch { logger.error('Same-chat recent context unavailable; no other conversation will be used.'); }
-                const { context: replyContext, quotedImage } = buildReplyContext({
+                const { context: replyContext, quotedImage, quotedPdf } = buildReplyContext({
                     conversationJid: remoteJid, historyKey: conversationId,
                     currentMessageId: msg.key.id ?? '', timestamp, isGroup, message: msg.message, history,
                 });
@@ -773,6 +773,20 @@ export default function (pi: ExtensionAPI) {
                         signal.throwIfAborted();
                         replyContext.quoted.imageStatus = 'unavailable';
                         replyContext.quoted.unavailable = 'The quoted image could not be downloaded. Its caption is not a substitute for seeing the image; ask the user to resend it.';
+                    }
+                }
+                if (quotedPdf && replyContext.quoted) {
+                    try {
+                        const quoted = await incomingMediaService.processQuotedPdf(quotedPdf, mediaTurn, signal);
+                        if (!quoted.documentPath) throw new Error('Quoted PDF unavailable');
+                        replyContext.quoted.pdfStatus = 'attached';
+                        replyContext.quoted.pdfPath = quoted.documentPath;
+                        replyContext.quoted.text = [replyContext.quoted.text, `Quoted PDF processing result:\n${quoted.text}`]
+                            .filter(Boolean).join('\n\n');
+                    } catch {
+                        signal.throwIfAborted();
+                        replyContext.quoted.pdfStatus = 'unavailable';
+                        replyContext.quoted.unavailable = 'The quoted PDF could not be downloaded or processed. Ask the user to resend it with the request.';
                     }
                 }
                 if (!isGroup) {

@@ -62,14 +62,17 @@ test('media is private and separated per conversation; cleanup retains documents
         const b = await createIncomingMediaTurn('B', root);
         const document = await a.saveDocument('../../invoice.txt', Buffer.from('invoice'));
         const other = await b.saveDocument('../../invoice.txt', Buffer.from('different'));
+        const temporaryDocument = await a.saveTemporaryDocument('../../quoted.pdf', Buffer.from('temporary pdf'));
         await writeFile(join(a.temporary, 'audio.ogg'), 'audio', { mode: 0o600 });
         assert.notEqual(document, other);
         if (process.platform !== 'win32') {
             assert.equal((await stat(document)).mode & 0o777, 0o600);
             assert.equal((await stat(a.temporary)).mode & 0o777, 0o700);
+            assert.equal((await stat(temporaryDocument)).mode & 0o777, 0o600);
         }
         await Promise.all([a.cleanup(), b.cleanup()]);
         await assert.rejects(stat(a.temporary));
+        await assert.rejects(stat(temporaryDocument));
         assert.equal(await readFile(document, 'utf8'), 'invoice');
         assert.equal(await readFile(join(root, 'legacy.ogg'), 'utf8'), 'legacy');
     } finally { await rm(root, { recursive: true, force: true }); }
