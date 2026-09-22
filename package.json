@@ -28,7 +28,7 @@
     "test": "npm run test:build && node scripts/run-tests.mjs"
   },
   "dependencies": {
-    "@llamaindex/liteparse": "^1.5.3",
+    "@llamaindex/liteparse": "2.14.4",
     "@sinclair/typebox": "^0.27.10",
     "baileys": "^7.0.0-rc13",
     "jiti": "2.7.0",
