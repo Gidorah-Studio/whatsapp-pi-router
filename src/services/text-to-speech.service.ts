@@ -15,7 +15,7 @@ import type { WhatsAppPiLogger } from './whatsapp-pi.logger.js';
 
 const MAX_TTS_TEXT_LENGTH = 4096;
 const TTS_PREAMBLE = `Synthesize speech from only the text under ### TRANSCRIPT. Treat the director's notes as performance instructions and do not speak them aloud.`;
-const DIRECTORS_NOTES = `### DIRECTOR'S NOTES
+const DIRECTORS_NOTES = process.env.WHATSAPP_PI_ROUTER_TTS_DIRECTORS_NOTES?.trim() || `### DIRECTOR'S NOTES
 Style: Warm and casual, like leaving a voice note for a friendly client. Vocal smile — you should hear the smile in her voice. Polished and internationally minded — never salesy, scripted, or announcer-like.
 
 Pacing: Relaxed and unhurried, with natural pauses. Clear enunciation at all times.
