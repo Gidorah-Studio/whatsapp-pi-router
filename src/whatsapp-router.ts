@@ -5,7 +5,7 @@ import { ConversationScheduler } from './services/conversation-scheduler.js';
 import { runManagedProcess } from './services/managed-process.js';
 import { createIncomingMediaTurn } from './services/incoming-media-storage.js';
 import { positiveInteger, RouterError, safeFailure } from './services/router-errors.js';
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
@@ -159,11 +159,18 @@ export const runPiForConversation = async (params: {
         if (params.childPiConfig.thinking) {
             args.push('--thinking', params.childPiConfig.thinking);
         }
-        args.push(
-            '--no-extensions',
-            '--extension', CHILD_WHATSAPP_MEDIA_EXTENSION_PATH,
-            '--print'
-        );
+        args.push('--no-extensions', '--extension', CHILD_WHATSAPP_MEDIA_EXTENSION_PATH);
+        // The routed child stays isolated from every other installed extension.
+        // An operator can opt in one explicitly named extension (for example,
+        // the MCP adapter) without enabling the entire parent package list.
+        const childExtensionPath = process.env.WHATSAPP_PI_ROUTER_CHILD_EXTENSION_PATH?.trim();
+        if (childExtensionPath) {
+            if (!isAbsolute(childExtensionPath)) {
+                throw new Error('WHATSAPP_PI_ROUTER_CHILD_EXTENSION_PATH must be an absolute path');
+            }
+            args.push('--extension', childExtensionPath);
+        }
+        args.push('--print');
 
         if (params.imageBuffer && params.imageMimeType) {
             const ext = params.imageMimeType.includes('png') ? 'png' : params.imageMimeType.includes('webp') ? 'webp' : 'jpg';
