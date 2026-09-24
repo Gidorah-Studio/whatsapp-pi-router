@@ -363,6 +363,7 @@ Precedence is environment override → saved `/whatsapp` setting → normal Pi d
 Optional environment variables:
 
 - `WHATSAPP_PI_ROUTER_PI_BIN` — Pi executable to spawn. Defaults to `pi`.
+- `WHATSAPP_PI_ROUTER_CHILD_EXTENSION_PATH` — optional absolute path to one additional, explicitly approved Pi extension for routed children (for example, an MCP adapter installed in this agent's own Pi directory). Children still use `--no-extensions` and the media handoff extension; unrelated installed extensions remain unloaded. Set only in the agent's trusted router environment and review the extension's tools and permissions before enabling it.
 - `WHATSAPP_PI_ROUTER_TIMEOUT_MS` — child Pi turn timeout. Defaults to 10 minutes.
 - `WHATSAPP_PI_ROUTER_MODEL` — model pattern passed to child Pi as `--model`, for example `openai-codex/gpt-5.6-luna`.
 - `WHATSAPP_PI_ROUTER_THINKING` — thinking level passed to child Pi as `--thinking`.
@@ -406,7 +407,7 @@ part of the unit suite.
 
 ## Notes
 
-- Child Pi turns use `--no-extensions` and explicitly load only the non-recursive `send_wa_image` handoff extension.
+- Child Pi turns use `--no-extensions` and explicitly load the non-recursive `send_wa_image` handoff extension, plus the single extension named by `WHATSAPP_PI_ROUTER_CHILD_EXTENSION_PATH` when the operator opts in.
 - Session history remains persistent because each WhatsApp JID maps to one stable private session directory.
 - Turns for the same conversation are serialized so simultaneous messages cannot create or update competing sessions.
 - Streaming is intentionally not implemented; WhatsApp receives the final answer once the child Pi turn completes.
