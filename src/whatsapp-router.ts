@@ -2,11 +2,11 @@ import { writeFile } from "node:fs/promises";
 import { buildReplyContext, serializeReplyContext, type ReplyContext } from './services/reply-context.js';
 import { InboundLedger } from './services/inbound-ledger.js';
 import { ConversationScheduler } from './services/conversation-scheduler.js';
-import { runManagedProcess } from './services/managed-process.js';
+import { createTurnBackend, resolveChildExtensionPaths, resolveChildTools, resolveTurnBackendKind } from './services/turn-backend.js';
 import { createIncomingMediaTurn } from './services/incoming-media-storage.js';
 import { isStoppedError, positiveInteger, RouterError, safeFailure, STOPPED_NOTICE } from './services/router-errors.js';
 import { stopTurnsThenSocket } from './services/router-shutdown.js';
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
@@ -151,56 +151,47 @@ export const runPiForConversation = async (params: {
     signal: AbortSignal;
     mediaDir?: string;
 }): Promise<RoutedPiTurnResult> => {
-    const piBin = process.env.WHATSAPP_PI_ROUTER_PI_BIN || 'pi';
-    const args = [...params.sessionLaunch.args];
+    // Configuration errors surface before any turn state is created.
+    const backend = createTurnBackend(resolveTurnBackendKind());
+    const tools = resolveChildTools();
+    // The conversation session stays isolated from every other installed extension.
+    // An operator can opt in one explicitly named extension (for example, the MCP
+    // adapter) without enabling the entire parent package list.
+    const extensionPaths = resolveChildExtensionPaths(CHILD_WHATSAPP_MEDIA_EXTENSION_PATH);
     const handoffDir = await createImageHandoffDirectory(params.mediaDir ?? createStoragePaths().mediaDir);
 
     try {
-        if (params.childPiConfig.model) {
-            args.push('--model', params.childPiConfig.model);
-        }
-        if (params.childPiConfig.thinking) {
-            args.push('--thinking', params.childPiConfig.thinking);
-        }
-        args.push('--no-extensions', '--extension', CHILD_WHATSAPP_MEDIA_EXTENSION_PATH);
-        // The routed child stays isolated from every other installed extension.
-        // An operator can opt in one explicitly named extension (for example,
-        // the MCP adapter) without enabling the entire parent package list.
-        const childExtensionPath = process.env.WHATSAPP_PI_ROUTER_CHILD_EXTENSION_PATH?.trim();
-        if (childExtensionPath) {
-            if (!isAbsolute(childExtensionPath)) {
-                throw new Error('WHATSAPP_PI_ROUTER_CHILD_EXTENSION_PATH must be an absolute path');
-            }
-            args.push('--extension', childExtensionPath);
-        }
-        args.push('--print');
-
+        const images: Array<{ path: string; mimeType: string }> = [];
+        const stageImage = async (name: string, buffer: Buffer, mimeType: string) => {
+            const ext = mimeType.includes('png') ? 'png' : mimeType.includes('webp') ? 'webp' : 'jpg';
+            const path = join(handoffDir, `${name}.${ext}`);
+            await writeFile(path, buffer, { flag: 'wx', mode: 0o600 });
+            images.push({ path, mimeType });
+        };
         if (params.imageBuffer && params.imageMimeType) {
-            const ext = params.imageMimeType.includes('png') ? 'png' : params.imageMimeType.includes('webp') ? 'webp' : 'jpg';
-            const imagePath = join(handoffDir, `incoming.${ext}`);
-            await writeFile(imagePath, params.imageBuffer, { flag: 'wx', mode: 0o600 });
-            args.push(`@${imagePath}`);
+            await stageImage('incoming', params.imageBuffer, params.imageMimeType);
         }
-
         if (params.quotedImageBuffer && params.quotedImageMimeType) {
-            const ext = params.quotedImageMimeType.includes('png') ? 'png' : params.quotedImageMimeType.includes('webp') ? 'webp' : 'jpg';
-            const imagePath = join(handoffDir, `quoted.${ext}`);
-            await writeFile(imagePath, params.quotedImageBuffer, { flag: 'wx', mode: 0o600 });
-            args.push(`@${imagePath}`);
+            await stageImage('quoted', params.quotedImageBuffer, params.quotedImageMimeType);
         }
         if (params.replyContext) {
             const payload = serializeReplyContext(params.replyContext);
             await writeFile(join(handoffDir, 'reply-context.json'), payload, { flag: 'wx', mode: 0o600 });
         }
 
-        const text = await runManagedProcess(piBin, args, {
+        const text = await backend.execute({
+            sessionLaunch: params.sessionLaunch,
+            prompt: params.prompt,
             cwd: params.cwd,
+            images,
+            childPiConfig: params.childPiConfig,
+            extensionPaths,
+            ...(tools ? { tools } : {}),
             env: {
                 ...process.env,
                 WHATSAPP_PI_ROUTER_CHILD: '1',
                 WHATSAPP_PI_ROUTER_IMAGE_HANDOFF_DIR: handoffDir,
             },
-            input: params.prompt,
             signal: params.signal,
             timeoutMs: positiveInteger(process.env.WHATSAPP_PI_ROUTER_TIMEOUT_MS, 10 * 60 * 1000),
             maxOutputBytes: positiveInteger(process.env.WHATSAPP_ROUTER_CHILD_MAX_OUTPUT_BYTES, 1024 * 1024, 16 * 1024 * 1024),
@@ -460,6 +451,16 @@ export default function (pi: ExtensionAPI) {
             const message = error instanceof Error ? error.message : String(error);
             logger.error('[WhatsApp-Pi-Router] Invalid child Pi settings:', message);
             ctx.ui.notify(`WhatsApp child Pi settings are invalid: ${message}`, 'error');
+        }
+
+        try {
+            const tools = resolveChildTools();
+            resolveChildExtensionPaths(CHILD_WHATSAPP_MEDIA_EXTENSION_PATH);
+            logger.log(`[WhatsApp-Pi-Router] Turn backend: ${resolveTurnBackendKind()}; child tools: ${tools ? tools.join(', ') : 'Pi default'}`);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error('[WhatsApp-Pi-Router] Invalid turn backend settings:', message);
+            ctx.ui.notify(`WhatsApp turn backend settings are invalid; routed turns will fail until fixed: ${message}`, 'error');
         }
 
         try {

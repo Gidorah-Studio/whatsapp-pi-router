@@ -13,6 +13,8 @@ export interface RoutedSessionRoute {
 export interface RoutedSessionLaunch {
     args: string[];
     mode: 'create' | 'continue' | 'migrate';
+    /** Legacy session to fork from when `mode` is `migrate`. */
+    forkPath?: string;
     route: RoutedSessionRoute;
 }
 
@@ -47,6 +49,7 @@ export async function resolveRoutedSessionLaunch(remoteJid: string, cwd: string)
         return {
             args: ['--fork', legacySession.path, '--session-dir', route.directory],
             mode: 'migrate',
+            forkPath: legacySession.path,
             route
         };
     }

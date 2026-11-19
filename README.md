@@ -367,6 +367,8 @@ Precedence is environment override → saved `/whatsapp` setting → normal Pi d
 Optional environment variables:
 
 - `WHATSAPP_PI_ROUTER_PI_BIN` — Pi executable to spawn. Defaults to `pi`.
+- `WHATSAPP_PI_ROUTER_BACKEND` — `cli` (default) or `sdk`. Selects how routed turns are executed; see [Execution backends](#execution-backends). Any other value fails routed turns with a logged configuration error.
+- `WHATSAPP_PI_ROUTER_CHILD_TOOLS` — optional comma-separated allowlist of tool names for conversation sessions, for example `read,send_wa_image`. It applies to built-in and extension tools on both backends. Unset keeps Pi's default tools. `send_wa_image` must be listed to keep image replies.
 - `WHATSAPP_PI_ROUTER_CHILD_EXTENSION_PATH` — optional absolute path to one additional, explicitly approved Pi extension for routed children (for example, an MCP adapter installed in this agent's own Pi directory). Children still use `--no-extensions` and the media handoff extension; unrelated installed extensions remain unloaded. Set only in the agent's trusted router environment and review the extension's tools and permissions before enabling it.
 - `WHATSAPP_PI_ROUTER_TIMEOUT_MS` — child Pi turn timeout. Defaults to 10 minutes.
 - `WHATSAPP_PI_ROUTER_MODEL` — model pattern passed to child Pi as `--model`, for example `openai-codex/gpt-5.6-luna`.
@@ -384,6 +386,39 @@ Optional environment variables:
 - `WHATSAPP_PI_ROUTER_TTS_SPEED` — speech speed from `0.5` to `2`. Defaults to `1`.
 
 TTS environment overrides take precedence over saved `/whatsapp` settings, which take precedence over router defaults. `OPENROUTER_API_KEY` is required whenever the effective TTS mode is not `off`.
+
+## Execution backends
+
+Turn execution is separate from WhatsApp transport. The router admits a message, stages its media and quote/recent context in the private per-turn handoff directory, and passes one normalized turn to a backend. The backend returns the final assistant text; the router reads any staged image handoff and sends the reply. Routing, allowlists, identity resolution, deduplication, per-chat FIFO, concurrency limits, media handling, and delivery are the same for both backends.
+
+| | `cli` (default) | `sdk` |
+|---|---|---|
+| Runs | `pi --print` (`WHATSAPP_PI_ROUTER_PI_BIN`) | `src/services/sdk-turn-worker.mjs`, a Node process that calls `@earendil-works/pi-coding-agent` directly |
+| Process per turn | Yes | Yes |
+| Session | `--session-dir <conversation dir> --continue`, or `--fork` for a legacy session | `SessionManager.continueRecent` on the same directory, or `forkFrom` for a legacy session |
+| Extensions | `--no-extensions` plus the media handoff extension and the optional child extension | `noExtensions` plus the same explicit paths |
+| Model and thinking | `--model`, `--thinking` | Same values resolved with Pi's CLI model resolver |
+| Tools | Pi defaults, or `--tools` from `WHATSAPP_PI_ROUTER_CHILD_TOOLS` | Pi defaults, or the same allowlist |
+
+Both backends run each turn in its own process under the same supervisor, so the turn deadline, output limit, abort on shutdown, process-tree termination, and the rule that a conversation slot is not released while its process may still be running apply to both. Sessions written by one backend resume under the other.
+
+Selecting a backend:
+
+```bash
+WHATSAPP_PI_ROUTER_BACKEND=sdk
+```
+
+The setting is read for every turn from the router's environment. With a service deployment, set it in that agent's environment file and restart only that agent's router. The log records `Turn backend: sdk` at startup. To roll back, remove the variable or set it to `cli` and restart; conversation history is kept.
+
+A failed SDK turn is reported to the sender with the generic failure message. It is never retried through the CLI, because a partially executed turn may already have run tools.
+
+Limitations of the `sdk` backend:
+
+- It uses the copy of `@earendil-works/pi-coding-agent` installed in this package's `node_modules`, which can differ from the version of the `pi` executable on the host. It was tested against 0.85.1. Check `npm ls @earendil-works/pi-coding-agent` in the package directory before enabling it.
+- The worker is started with the Node executable running the router, as the media worker is.
+- Inbound images are passed to the model at their downloaded size. The CLI applies Pi's image auto-resize setting.
+- Skills, prompt templates, and `AGENTS.md` context files are discovered from the working directory and the Pi agent directory, as with the CLI. Only extensions and tools are restricted.
+- A tool allowlist limits what the model can call. Neither backend sandboxes the filesystem, shell, or inherited environment of a tool that is allowed.
 
 ## Development
 
