@@ -305,8 +305,6 @@ const fallback = {
     "incoming.media.documentPdfPreviewHeading": "PDF text preview:",
     "incoming.media.documentPdfFallbackNotice": "PDF text was not extracted automatically. The file is saved at the path above.",
     "incoming.media.documentTextPreviewHeading": "Document text preview:",
-    "incoming.media.documentTextLocation": "Full extracted text (plain text; read this file instead of the original): {textPath}",
-    "incoming.media.documentTextFallbackNotice": "Document text was not extracted automatically. The file is saved at the path above.",
     "incoming.media.documentDownloadFailed": "[WhatsApp-Pi] Failed to download document:",
     "incoming.media.documentDownloadFailedText": "[Document: {fileName} (download failed)]",
     "audio.emptyTranscription": "[Empty transcription]",
