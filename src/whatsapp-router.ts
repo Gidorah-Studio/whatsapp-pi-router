@@ -344,7 +344,7 @@ export default function (pi: ExtensionAPI) {
             return `${status} - All groups`;
         }
 
-        const allowedChats = sessionManager.getAllowList().length + sessionManager.getAllowedGroups().length;
+        const allowedChats = sessionManager.getAllowedConversationCount();
         if (allowedChats === 0) {
             return `${status} - No chats`;
         }
@@ -508,9 +508,7 @@ export default function (pi: ExtensionAPI) {
         } else if (routerAllowConfig.groupReplyMode === 'mentions-or-keywords') {
             logger.log(`[WhatsApp-Pi] Group mentions, keywords or replies mode enabled with ${routerAllowConfig.groupReplyKeywords.length} keywords; group access rules remain unchanged.`);
         }
-        for (const number of routerAllowConfig.allow) {
-            await sessionManager.addNumber(number);
-        }
+        sessionManager.setConfiguredAllowEntries(routerAllowConfig.allow);
         await recentsService.ensureInitialized();
         await identityMapService.ensureInitialized();
         installGracefulShutdownHandlers();

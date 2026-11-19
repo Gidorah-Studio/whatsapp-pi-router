@@ -367,7 +367,7 @@ Optional environment variables:
 - `WHATSAPP_PI_ROUTER_TIMEOUT_MS` — child Pi turn timeout. Defaults to 10 minutes.
 - `WHATSAPP_PI_ROUTER_MODEL` — model pattern passed to child Pi as `--model`, for example `openai-codex/gpt-5.6-luna`.
 - `WHATSAPP_PI_ROUTER_THINKING` — thinking level passed to child Pi as `--thinking`.
-- `WHATSAPP_ROUTER_ALLOW_NUMBERS` — comma-separated numbers/JIDs to force-add to the allowlist at startup.
+- `WHATSAPP_ROUTER_ALLOW_NUMBERS` — comma-separated numbers/JIDs allowed for as long as they are listed. Phone numbers may be written as `+14155551212`, `14155551212`, or `14155551212@s.whatsapp.net`. These entries, like `allow` in `router-allow.json`, are applied at startup and are not copied into `config.json`: removing one revokes it at the next restart. Entries added through `/whatsapp` are saved separately and stay until removed there.
 - `WHATSAPP_ROUTER_ALLOW_ALL` or `WHATSAPP_ROUTER_ALLOW_ALL_DIRECT_CHATS` — set to `true`, `1`, `yes`, `on`, `all`, or `*` to route every inbound direct chat without allowlist checks.
 - `WHATSAPP_ROUTER_ALLOW_ALL_GROUPS` — set to a truthy value to route every inbound group without allowlist checks. Groups are explicit-only by default.
 - `WHATSAPP_ROUTER_OUTBOUND_POLL_MS` — outbound queue polling interval in milliseconds. Defaults to `2000`; values below `500` are ignored.

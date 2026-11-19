@@ -19,6 +19,21 @@ export interface Contact {
     sendNumber?: string;
 }
 
+/**
+ * Canonical allowlist key. Admission compares against `+digits` for phone
+ * chats, so `14155551212`, `+1 (415) 555-1212` and
+ * `14155551212@s.whatsapp.net` must all resolve to the same entry.
+ * Group and LID JIDs keep their domain.
+ */
+export function normalizeAllowEntry(value: string): string {
+    const trimmed = value.trim();
+    if (trimmed.endsWith('@g.us')) return trimmed;
+    if (trimmed.endsWith('@lid')) return trimmed.replace(/:\d+@lid$/, '@lid');
+    const local = trimmed.replace(/@s\.whatsapp\.net$/, '').split(':')[0];
+    const digits = local.replace(/[\s().-]/g, '').replace(/^\+/, '');
+    return /^\d+$/.test(digits) ? `+${digits}` : trimmed;
+}
+
 const SESSION_STATUSES = new Set<SessionStatus>([
     'logged-out',
     'connecting',
@@ -53,6 +68,9 @@ export class SessionManager {
     private allowList: Contact[] = [];
     private allowedGroups: Contact[] = [];
     private ignoredNumbers: Contact[] = [];
+    // Entries from the environment or router-allow.json. Never written to
+    // config.json, so removing one from its source revokes it on restart.
+    private configuredAllow = new Set<string>();
     private allowAllDirectChats = false;
     private allowAllGroups = false;
     private groupReplyMode: GroupReplyMode = 'all';
@@ -108,7 +126,7 @@ export class SessionManager {
             const { config, recovered } = this.parseConfig(data);
             
             const cleanContact = (item: any): Contact | null => {
-                if (typeof item === 'string') return { number: item };
+                if (typeof item === 'string') return { number: normalizeAllowEntry(item) };
                 if (item && typeof item === 'object') {
                     let num = item.number;
                     // Unroll nested objects if any
@@ -116,6 +134,7 @@ export class SessionManager {
                         num = num.number;
                     }
                     if (typeof num === 'string') {
+                        num = normalizeAllowEntry(num);
                         const sendNumber = typeof item.sendNumber === 'string' ? item.sendNumber : undefined;
                         return { number: num, name: item.name, sendNumber };
                     }
@@ -126,7 +145,7 @@ export class SessionManager {
             const loadedAllowList = (config.allowList || []).map(cleanContact).filter(Boolean) as Contact[];
             const loadedAllowedGroups = (config.allowedGroups || []).map(cleanContact).filter(Boolean) as Contact[];
             const migratedGroups = loadedAllowList.filter(c => SessionManager.isGroupJid(c.number));
-            this.allowList = loadedAllowList.filter(c => !SessionManager.isGroupJid(c.number));
+            this.allowList = this.mergeContacts([], loadedAllowList.filter(c => !SessionManager.isGroupJid(c.number)));
             this.allowedGroups = this.mergeContacts(loadedAllowedGroups, migratedGroups);
             this.ignoredNumbers = (config.ignoredNumbers || []).map(cleanContact).filter(Boolean) as Contact[];
             this.status = SESSION_STATUSES.has(config.status) ? config.status : 'logged-out';
@@ -287,12 +306,25 @@ export class SessionManager {
         return this.groupReplyKeywordMatcher.matches(text);
     }
 
+    setConfiguredAllowEntries(entries: string[]) {
+        this.configuredAllow = new Set(entries.map(normalizeAllowEntry).filter(Boolean));
+    }
+
+    getAllowedConversationCount(): number {
+        return new Set([
+            ...this.allowList.map(c => c.number),
+            ...this.allowedGroups.map(c => c.number),
+            ...this.configuredAllow
+        ]).size;
+    }
+
     getAllowList(): Contact[] {
         return this.allowList;
     }
 
     getAllowedContact(number: string): Contact | undefined {
-        return this.allowList.find(c => c.number === number);
+        const normalized = normalizeAllowEntry(number);
+        return this.allowList.find(c => c.number === normalized);
     }
 
     getAllowedGroups(): Contact[] {
@@ -323,6 +355,7 @@ export class SessionManager {
             console.warn(t('session.manager.invalidNumber'), cleanNumber);
             return;
         }
+        cleanNumber = normalizeAllowEntry(cleanNumber);
 
         const existing = this.allowList.find(c => c.number === cleanNumber);
         if (!existing) {
@@ -343,7 +376,8 @@ export class SessionManager {
     }
 
     async removeNumber(number: string) {
-        this.allowList = this.allowList.filter(c => c.number !== number);
+        const normalized = normalizeAllowEntry(number);
+        this.allowList = this.allowList.filter(c => c.number !== normalized);
         await this.saveConfig();
     }
 
@@ -437,11 +471,16 @@ export class SessionManager {
     }
 
     isAllowed(number: string): boolean {
-        return this.allowAllDirectChats || this.allowList.some(c => c.number === number);
+        const normalized = normalizeAllowEntry(number);
+        return this.allowAllDirectChats
+            || this.configuredAllow.has(normalized)
+            || this.allowList.some(c => c.number === normalized);
     }
 
     isAllowedGroup(groupJid: string): boolean {
-        return this.allowAllGroups || this.allowedGroups.some(c => c.number === groupJid);
+        return this.allowAllGroups
+            || this.configuredAllow.has(groupJid)
+            || this.allowedGroups.some(c => c.number === groupJid);
     }
 
     isConversationAllowed(sender: string): boolean {
