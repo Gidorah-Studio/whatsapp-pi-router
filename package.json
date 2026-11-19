@@ -24,7 +24,7 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test:build": "node -e \"require('node:fs').rmSync('.test-dist',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node -e \"require('node:fs').copyFileSync('src/services/media-worker.mjs','.test-dist/src/services/media-worker.mjs')\"",
+    "test:build": "node -e \"require('node:fs').rmSync('.test-dist',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node -e \"for (const f of ['services/media-worker.mjs','services/sdk-turn-worker.mjs','child-whatsapp-media.extension.ts']) require('node:fs').copyFileSync('src/'+f,'.test-dist/src/'+f)\"",
     "test": "npm run test:build && node scripts/run-tests.mjs"
   },
   "dependencies": {
