@@ -4,7 +4,8 @@ import { InboundLedger } from './services/inbound-ledger.js';
 import { ConversationScheduler } from './services/conversation-scheduler.js';
 import { runManagedProcess } from './services/managed-process.js';
 import { createIncomingMediaTurn } from './services/incoming-media-storage.js';
-import { positiveInteger, RouterError, safeFailure } from './services/router-errors.js';
+import { isStoppedError, positiveInteger, RouterError, safeFailure, STOPPED_NOTICE } from './services/router-errors.js';
+import { stopTurnsThenSocket } from './services/router-shutdown.js';
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -45,6 +46,8 @@ import {
 const CHILD_WHATSAPP_MEDIA_EXTENSION_PATH = fileURLToPath(
     new URL('./child-whatsapp-media.extension.ts', import.meta.url)
 );
+
+const STOP_NOTICE_GRACE_MS = 15_000;
 
 const shutdownState = globalThis as typeof globalThis & {
     __whatsappPiShutdown?: {
@@ -369,6 +372,8 @@ export default function (pi: ExtensionAPI) {
         _ctx.ui.setStatus('whatsapp', formatFooterStatus(displayStatus));
     };
 
+    // One restart notice per conversation, however many of its turns were cancelled.
+    const stopNoticeSent = new Set<string>();
     let stopPromise: Promise<void> | undefined;
     const stopRouter = async () => {
         if (stopPromise) {
@@ -382,12 +387,18 @@ export default function (pi: ExtensionAPI) {
         stopPromise = (async () => {
             try {
                 outboundQueueService.stop();
+                stopNoticeSent.clear();
                 try {
-                    if (routerActive) await whatsappService.stop();
-                } finally {
                     // Even a failed socket stop must not release auth ownership while children write.
-                    await conversationScheduler.stop();
-                    await whatsappService.drainIncoming();
+                    await stopTurnsThenSocket({
+                        stopTurns: async () => {
+                            await conversationScheduler.stop();
+                            await whatsappService.drainIncoming();
+                        },
+                        stopSocket: async () => { if (routerActive) await whatsappService.stop(); },
+                        graceMs: STOP_NOTICE_GRACE_MS,
+                    });
+                } finally {
                     await recentsService.drain();
                 }
                 await whatsappService.recordLifecycleEvent({
@@ -576,8 +587,6 @@ export default function (pi: ExtensionAPI) {
         } else {
             ctx.ui.notify('WhatsApp: Use Connect / Reconnect WhatsApp. QR code will appear only if pairing is needed.', 'info');
         }
-
-        ctx.ui.notify('WhatsApp: Session reset via /new is now fully supported.', 'info');
     });
 
     // Track whether send_wa_message tool already sent a reply this turn
@@ -850,9 +859,13 @@ export default function (pi: ExtensionAPI) {
         }).catch(async error => {
             const failure = safeFailure(error, 'routed-turn');
             logger.error(failure.diagnostic);
-            if (!(error instanceof RouterError && error.kind === 'stopped') &&
-                !(error instanceof Error && error.name === 'AbortError')) {
-                try { await whatsappService.sendMessage(replyJid, failure.message); }
+            const stopped = isStoppedError(error);
+            const notify = stopped
+                ? whatsappService.getEffectiveStatus() === 'connected' && !stopNoticeSent.has(replyJid)
+                : true;
+            if (notify) {
+                if (stopped) stopNoticeSent.add(replyJid);
+                try { await whatsappService.sendMessage(replyJid, stopped ? STOPPED_NOTICE : failure.message); }
                 catch (sendError) { logger.error(safeFailure(sendError, 'failure-notice').diagnostic); }
             }
             throw error;
