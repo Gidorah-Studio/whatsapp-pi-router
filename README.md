@@ -176,7 +176,17 @@ message later. Other chats can progress while one conversation is busy.
 Invalid, non-integer, zero, or out-of-range values fall back to defaults. Incoming
 text is limited to 65,536 characters. Media byte limits check both advertised and
 actually downloaded sizes. Downloads respect cancellation. PDF previews parse at
-most 3 pages with one OCR worker. Audio decoding is limited to under 10 minutes.
+most 3 pages with one OCR worker. Other documents have their text extracted in the
+same killable worker: plain-text formats (`.txt`, `.csv`, `.tsv`, `.md`, `.json`,
+`.xml`, `.html`, `.log`, `.yaml`) are read directly, and Office/OpenDocument files
+(`.docx`, `.doc`, `.xlsx`, `.xls`, `.pptx`, `.ppt`, `.rtf`, `.odt`, `.ods`, `.odp`)
+are converted through LibreOffice, which must be installed on the host (`soffice` on
+`PATH`). Up to 50 pages and 500,000 characters are written to
+`<document>.extracted.txt` beside the saved file; the prompt carries a 1,200-character
+preview and that path so the agent can read the rest. Spreadsheets come out as
+whitespace-aligned text, not cell coordinates or formulas. When extraction fails or
+LibreOffice is missing, the prompt says so and still gives the original file's path.
+Quoted non-PDF documents are not extracted. Audio decoding is limited to under 10 minutes.
 Native OCR/STT runs in a separate process with a 512 MiB V8 heap limit; this is not
 an OS-level native-memory sandbox. Local Whisper initializes per audio subprocess,
 which trades additional startup overhead for cancellable, isolated native work.

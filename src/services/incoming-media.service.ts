@@ -6,6 +6,7 @@ import { downloadBoundedMedia } from './bounded-media.js';
 import type { IncomingMediaTurn } from './incoming-media-storage.js';
 import { runMediaWorker } from './media-worker.js';
 import { safeFailure } from './router-errors.js';
+import { extractedTextPath, isExtractableDocument } from './document-text.js';
 
 export interface ProcessedIncomingContent {
     text: string;
@@ -68,8 +69,24 @@ export class IncomingMediaService {
                 this.logger.warn(safeFailure(error, 'pdf-preview').diagnostic);
                 text += `\n\n${t('incoming.media.documentPdfFallbackNotice')}`;
             }
+        } else if (isExtractableDocument(fileName)) {
+            text += `\n\n${await this.extractDocumentText(path, signal)}`;
         }
         if (document.caption) text += `\n\n${t('incoming.media.documentDescription', { caption: String(document.caption).slice(0, 65536) })}`;
         return { text, documentPath: path };
+    }
+
+    private async extractDocumentText(path: string, signal?: AbortSignal): Promise<string> {
+        const textPath = extractedTextPath(path);
+        try {
+            const preview = (await this.runWorker('document', path, signal, textPath)).trim();
+            if (!preview) return t('incoming.media.documentTextFallbackNotice');
+            return t('incoming.media.documentTextPreviewHeading') + '\n' + preview + '\n\n'
+                + t('incoming.media.documentTextLocation', { textPath });
+        } catch (error) {
+            signal?.throwIfAborted();
+            this.logger.warn(safeFailure(error, 'document-text').diagnostic);
+            return t('incoming.media.documentTextFallbackNotice');
+        }
     }
 }
